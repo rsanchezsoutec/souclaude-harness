@@ -6,7 +6,7 @@ import { readLockfile } from '../core/lockfile.js'
 import { readIfExists } from '../core/fsx.js'
 import { computePlan, writeActions, NOOP, LOCAL_EDIT } from '../core/plan.js'
 import { avisoCliDesactualizado } from '../core/version-remota.js'
-import { resolveVars } from './_shared.js'
+import { resolveVars, avisarIgnorados } from './_shared.js'
 
 // Claves que Claude Code ignora en silencio. Estaban en el Kit v0 y son la razon
 // por la que un settings.json puede "estar configurado" sin hacer absolutamente nada.
@@ -36,6 +36,7 @@ export async function status(flags, cwd) {
   const plan = computePlan({ manifest, cwd, lock, vars, detected })
 
   ui.renderPlan(plan, { verbose: Boolean(flags.verbose) })
+  avisarIgnorados(plan)
 
   checkSettings(cwd)
 

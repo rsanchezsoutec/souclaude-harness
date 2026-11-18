@@ -1,6 +1,6 @@
 import path from 'node:path'
 import { hashContent, hashBytes, normalize } from './hash.js'
-import { readIfExists, readBytesIfExists } from './fsx.js'
+import { leerParaElPlan, esDestSeguro } from './fsx.js'
 import { readTemplate, readTemplateBytes, readFragments } from './manifest.js'
 import { render } from './render.js'
 import { buildBlock, upsertBlock, extractBlock } from './block.js'
@@ -27,6 +27,9 @@ export const MODOS = ['equipo', 'solo']
 export function computePlan({ manifest, cwd, lock, vars, detected, force = false, skills, modo }) {
   const actions = []
   const skippedByStack = []
+  // Claves del lockfile que no son una ruta relativa dentro del repo: no se
+  // planifica nada sobre ellas (ni leer, ni borrar) y el CLI lo avisa.
+  const ignorados = []
   const fromVersion = lock?.harnessVersion ?? '0.0.0'
   const seenDests = new Set()
 
@@ -81,6 +84,11 @@ export function computePlan({ manifest, cwd, lock, vars, detected, force = false
   }
 
   for (const entry of emitted) {
+    // El manifest viaja con el CLI y es confiable, pero un dest fuera del repo es
+    // un error de quien lo edito: se corta aca, antes de leer o escribir nada.
+    if (!esDestSeguro(entry.dest)) {
+      throw new Error(`manifest invalido: el entry "${entry.id}" tiene un dest fuera del repo (${entry.dest})`)
+    }
     const group = entry.policy === 'merge-json' ? mergeJsonGroups.get(entry.dest) : null
     // Solo la primera entrada del grupo planifica; las demas ya quedaron
     // fundidas como seedEntries.
@@ -97,9 +105,13 @@ export function computePlan({ manifest, cwd, lock, vars, detected, force = false
   // acomodarlo a su gusto y --prune exige la confirmacion escrita de siempre (P6).
   for (const dest of Object.keys(lock?.files ?? {})) {
     if (seenDests.has(dest)) continue
+    if (!esDestSeguro(dest)) {
+      ignorados.push({ dest, motivo: 'no es una ruta relativa dentro del repo' })
+      continue
+    }
     const abs = path.join(cwd, ...dest.split('/'))
     const lockEntry = lock.files[dest]
-    const raw = lockEntry.binary ? readBytesIfExists(abs) : readIfExists(abs)
+    const raw = leerParaElPlan(abs, dest, { binario: Boolean(lockEntry.binary) })
     if (raw == null) continue
     const diskHash = lockEntry.binary ? hashBytes(raw) : hashContent(raw)
     const edited = diskHash !== lockEntry.hash
@@ -121,16 +133,17 @@ export function computePlan({ manifest, cwd, lock, vars, detected, force = false
   for (const dead of manifest.obsolete ?? []) {
     if (seenDests.has(dead.dest)) continue
     const abs = path.join(cwd, ...dead.dest.split('/'))
-    if (readIfExists(abs) == null) continue
     const lockEntry = lock?.files?.[dead.dest]
-    const diskHash = lockEntry ? (lockEntry.binary ? hashBytes(readBytesIfExists(abs)) : hashContent(readIfExists(abs))) : null
+    const enDisco = leerParaElPlan(abs, dead.dest, { binario: Boolean(lockEntry?.binary) })
+    if (enDisco == null) continue
+    const diskHash = lockEntry ? (lockEntry.binary ? hashBytes(enDisco) : hashContent(enDisco)) : null
     const autoPrune = lockEntry != null && diskHash === lockEntry.hash
     actions.push({ dest: dead.dest, policy: 'managed', verdict: OBSOLETE, autoPrune, reasons: [dead.reason] })
   }
 
   const dirs = (manifest.dirs ?? []).filter((d) => !(d.when === 'empty-repo' && !detected.isEmpty))
 
-  return { actions, dirs, fromVersion, toVersion: manifest.harnessVersion, skills: [...selected].sort(), modo: modoActivo, skippedByStack }
+  return { actions, dirs, fromVersion, toVersion: manifest.harnessVersion, skills: [...selected].sort(), modo: modoActivo, skippedByStack, ignorados }
 }
 
 // Las required del catalogo del modo entran SIEMPRE, se pidan o no: es la
@@ -151,7 +164,7 @@ export function resolveSkillSet({ manifest, lock, skills, modo = 'equipo' }) {
 function planFile({ entry, manifest, cwd, lock, vars, detected, fromVersion, force, seedEntries }) {
   const abs = path.join(cwd, ...entry.dest.split('/'))
   if (entry.binary) return planBinaryFile({ entry, abs, lock, force })
-  const raw = readIfExists(abs)
+  const raw = leerParaElPlan(abs, entry.dest)
 
   // Un archivo vacio es equivalente a un archivo ausente: no hay nada del usuario que
   // perder, asi que se escribe en vez de dejarle un .new al lado para siempre. El caso
@@ -260,7 +273,7 @@ function conMigracion(action, baseline, onDisk) {
 // La misma tabla de clasificacion que planFile, pero comparando bytes: sin
 // migraciones, sin render y sin normalizacion de newlines (corromperia un PNG).
 function planBinaryFile({ entry, abs, lock, force }) {
-  const raw = readBytesIfExists(abs)
+  const raw = leerParaElPlan(abs, entry.dest, { binario: true })
   const onDisk = raw != null && raw.length === 0 ? null : raw
   const desired = readTemplateBytes(entry.src)
   const lockEntry = lock?.files?.[entry.dest]
