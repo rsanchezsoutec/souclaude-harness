@@ -65,11 +65,17 @@ const COMMIT_MENSAJES_PROHIBIDOS = ['update', 'fix', 'cosas', 'ya', 'ahora si', 
 // .env.example (y sus variantes sample/template/dist) es la plantilla sin
 // valores que la propia skill pide commitear y que el harness siembra: no es un
 // secreto. Cualquier otro .env.* si lo es (.env.local, .env.staging...).
+// Las llaves privadas SSH (id_rsa, id_ed25519...; la .pub no) y los .p12 -- el
+// mismo contenedor PKCS#12 que .pfx -- entran por coherencia con lo que
+// .claude/settings.json ya le impide LEER al agente (Read(./**/id_rsa*)): lo que
+// no puede leer, tampoco deberia poder subir.
 const SECRETO_ARCHIVOS = [
   /(^|\/)\.env(?!\.(?:example|sample|template|dist)$)(\..+)?$/,
   /\.pem$/,
   /\.key$/,
   /\.pfx$/,
+  /\.p12$/,
+  /(^|\/)id_(rsa|dsa|ecdsa|ed25519)$/,
   /(^|\/)credentials\.json$/,
   /(^|\/)secrets\.json$/,
 ]
@@ -158,15 +164,21 @@ function commitsDeLaRama(baseRef, cabeza) {
 }
 
 // Diff de arboles: lo que el PR agregaria a la base al mergearse.
+//
+// --no-renames: con la deteccion de renombres activa (el default de git), un
+// `git mv notas.txt .env` figura como R (renombrado) y no como A (agregado), y
+// el filtro lo dejaba pasar: bastaba renombrar un archivo ya versionado para
+// subir credenciales con el check en verde. Sin deteccion, el nombre nuevo es
+// un alta, que es lo que es para quien clona el repo.
 function archivosAgregados(baseRef, cabeza) {
-  return rutas(['diff', `${baseRef}..${cabeza}`, '--diff-filter=A', '--name-only', '-z'])
+  return rutas(['diff', `${baseRef}..${cabeza}`, '--no-renames', '--diff-filter=A', '--name-only', '-z'])
 }
 
 // Commit por commit, todo lo que un push subiria: un archivo agregado en un
 // commit y borrado en el siguiente no aparece en el diff de arboles, pero el
 // push sube igual el commit que lo contiene.
 function archivosSinPushear(cabeza) {
-  return rutas(['log', cabeza, '--not', '--remotes=origin', '--diff-filter=A', '--name-only', '-z', '--format='])
+  return rutas(['log', cabeza, '--not', '--remotes=origin', '--no-renames', '--diff-filter=A', '--name-only', '-z', '--format='])
 }
 
 function tagsRemotos() {

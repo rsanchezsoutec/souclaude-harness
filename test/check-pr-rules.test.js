@@ -221,6 +221,15 @@ test('esArchivoDeSecreto: los .env reales y las credenciales si lo son', () => {
   }
 })
 
+test('esArchivoDeSecreto: llaves privadas SSH y contenedores PKCS#12; la clave publica no', () => {
+  for (const ruta of ['id_rsa', 'deploy/id_ed25519', '.ssh/id_ecdsa', 'id_dsa', 'certs/cliente.p12']) {
+    assert.equal(esArchivoDeSecreto(ruta), true, ruta)
+  }
+  for (const ruta of ['id_rsa.pub', 'docs/id_rsa.md', 'mi_id_rsa', 'src/id_ed25519.test.js']) {
+    assert.equal(esArchivoDeSecreto(ruta), false, ruta)
+  }
+})
+
 test('evaluaSecretos: el detalle dice donde se buscaron', () => {
   const r = evaluaSecretos(['a.txt', '.env.staging'], 'en commits sin pushear')
   assert.equal(r.cumple, false)
@@ -364,6 +373,29 @@ test('secretos: una ruta con tildes se detecta y .env.example no', () => {
   const r = correrCheck(dir, ['--grupo', 'secretos'])
   assert.equal(r.status, 1, r.stdout)
   assert.match(r.stdout, /datos\/configuración\/credentials\.json/)
+})
+
+// Con la deteccion de renombres de git (activa por defecto), renombrar un
+// archivo ya versionado a un nombre de credencial figuraba como R y no como A, y
+// pasaba el filtro: `git mv` era una forma de subir un .env con el check en verde.
+test('secretos: un archivo renombrado a un nombre de credencial se detecta igual que uno agregado', () => {
+  const dir = repoConBase()
+  git(dir, 'switch', '-q', 'dev')
+  commitear(dir, { 'datos.txt': 'DB_PASSWORD=x\nAPI_TOKEN=y\nOTRA=1\nMAS=2\n' }, 'chore: datos')
+  git(dir, 'update-ref', 'refs/remotes/origin/dev', 'HEAD')
+  git(dir, 'switch', '-q', 'fix/M1-algo')
+  git(dir, 'merge', '-q', '--ff-only', 'dev')
+
+  git(dir, 'mv', 'datos.txt', '.env')
+  git(dir, 'commit', '-q', '-m', 'chore: mover')
+  assert.match(git(dir, 'diff', 'origin/dev..HEAD', '--name-status'), /^R100\tdatos\.txt\t\.env/, 'el fixture ya no produce un renombre puro')
+
+  const arbol = correrCheck(dir, ['--grupo', 'secretos'])
+  assert.equal(arbol.status, 1, arbol.stdout)
+  assert.match(arbol.stdout, /\[FAIL\] sin-secretos: archivos sospechosos agregados: \.env/)
+  const push = correrCheck(dir, ['--grupo', 'secretos', '--sin-pushear'])
+  assert.equal(push.status, 1, push.stdout)
+  assert.match(push.stdout, /\[FAIL\] sin-secretos: archivos sospechosos en commits sin pushear: \.env/)
 })
 
 test('pr-metadata sin gh disponible: [ERROR] y exit 2, no un FAIL de regla', () => {
