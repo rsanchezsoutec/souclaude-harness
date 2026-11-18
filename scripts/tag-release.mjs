@@ -13,7 +13,10 @@
 //
 // No crea el GitHub Release: eso lo hace scripts/release-publicar.mjs.
 // Es idempotente: si vX.Y.Z ya existe (alguien lo taggeó a mano), no falla
-// ni duplica -- solo reporta y sale 0.
+// ni duplica -- solo reporta y sale 0. Si existe pero en OTRO commit que el que
+// se está publicando (el release no subió `version` en package.json), lo avisa
+// en la salida y, dentro de Actions, como anotación del workflow: un release
+// sin tag nuevo puede ser a propósito, pero no en silencio.
 //
 // Uso: node scripts/tag-release.mjs [--ref <ref>]
 
@@ -72,6 +75,16 @@ function main() {
 
   if (tagExiste(inmutable)) {
     console.log(`[skip] ${inmutable} ya existe -- release ya taggeado, no se toca.`)
+    // El tag existe, pero en otro commit: este merge no subió la versión, así que
+    // no nace ningún tag y el móvil no avanza. Sigue saliendo 0 (un release puede
+    // marcar "no requiere versión"), pero queda a la vista.
+    const commitDelTag = sh(['git', 'rev-parse', `${inmutable}^{commit}`])
+    const commitPublicado = sh(['git', 'rev-parse', `${objetivo}^{commit}`])
+    if (commitDelTag !== commitPublicado) {
+      const aviso = `${inmutable} ya existe en ${commitDelTag.slice(0, 7)} y este release es ${commitPublicado.slice(0, 7)}: no se creó ningún tag nuevo. Si debía publicar una versión, sube "version" en package.json y vuelve a correr este script.`
+      console.log(`[aviso] ${aviso}`)
+      if (process.env.GITHUB_ACTIONS === 'true') console.log(`::warning title=Release sin tag nuevo::${aviso}`)
+    }
   } else {
     sh(['git', 'tag', '-a', inmutable, '-m', `Release ${inmutable}`, objetivo])
     sh(['git', 'push', 'origin', inmutable])

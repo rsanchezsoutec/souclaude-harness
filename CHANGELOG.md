@@ -123,6 +123,10 @@ versión, ajustar a él el `to` de las dos migraciones nuevas y regenerar
   nuevo que escribir. Ahora cuenta como drift (exit 2, igual que una edición local)
   y `status` dice qué propuestas esperan revisión. Si el `.new` falta o quedó
   viejo, sigue siendo un cambio pendiente (exit 1).
+- **Un release que no sube la versión deja de pasar en silencio**: si el tag
+  `vX.Y.Z` ya existe en otro commit que el que se publica, `tag-release.mjs` lo
+  avisa en su salida y, dentro de Actions, como anotación del workflow. Sigue
+  saliendo 0: un release puede no requerir versión.
 
 ### Agregado
 
