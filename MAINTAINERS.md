@@ -76,27 +76,27 @@ Editas `templates/base/<ruta>` y listo. El efecto en repos ya instalados depende
   dev lo edita (lo habitual) **no se pisa** y recibe un `.new`. Cámbialo sabiendo eso:
   para que una corrección llegue a un archivo ya editado hace falta una migración.
 
-Después: `npm test`, y **subí la versión** (receta 6) para que `status` marque el upgrade.
+Después: `npm test`, y **sube la versión** (receta 6) para que `status` marque el upgrade.
 
 ### 2. Agregar un archivo nuevo al harness
 
 1. Crea el template en `templates/base/<ruta>`. **Los dotfiles se guardan sin el punto**
    (`templates/base/gitignore`, no `.gitignore`) y el nombre real va en `dest`.
-2. Agregá una entrada en `templates/harness.manifest.json` → `files[]`:
+2. Agrega una entrada en `templates/harness.manifest.json` → `files[]`:
    ```json
    { "id": "mi-doc", "src": "base/docs/mi-doc.md", "dest": "docs/mi-doc.md",
      "render": true, "policy": "managed" }
    ```
    - `render: true` si el template usa `{{VARS}}`.
    - `when: "empty-repo"` si solo va en repos nuevos (como `src/`, `README.md`).
-3. Si usas una variable nueva (`{{FOO}}`), resolvela en `src/commands/_shared.js` →
+3. Si usas una variable nueva (`{{FOO}}`), resuélvela en `src/commands/_shared.js` →
    `resolveVars()`.
-4. Agregá o extendé un test en `test/`.
-5. Subí la versión (receta 6).
+4. Agrega o extiende un test en `test/`.
+5. Sube la versión (receta 6).
 
 ### 3. Agregar un stack o un fragmento de `.gitignore`
 
-- `src/core/detect.js` → `SIGNATURES`: agregá el stack (con su `enforcer` para P2).
+- `src/core/detect.js` → `SIGNATURES`: agrega el stack (con su `enforcer` para P2).
 - `templates/fragments/gitignore/<stack>.txt`: el fragmento. Se concatena con `base.txt`
   cuando ese stack se detecta.
 
@@ -113,7 +113,7 @@ Después: `npm test`, y **subí la versión** (receta 6) para que `status` marqu
 
 El seed-merge y el hash-diff **solo agregan / sobrescriben lo intacto**; no reescriben lo
 que el usuario editó. Para un cambio mecánico sobre lo que ya hay en disco (ej. remover
-una clave inválida), agregá una migración en `src/migrations/index.js`:
+una clave inválida), agrega una migración en `src/migrations/index.js`:
 
 ```js
 {
