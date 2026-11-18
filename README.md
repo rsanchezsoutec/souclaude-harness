@@ -327,7 +327,10 @@ Para los dos archivos que el harness no posee del todo:
 - `.gitignore` — solo es dueño de un bloque delimitado. Tus líneas nunca se tocan.
 - `.claude/settings.json` — solo **agrega** claves que faltan. Nunca pisa un valor que
   tú escribiste. La única vez que retira algo es al cambiar de modo, y solo lo que el
-  propio harness había sembrado para el modo anterior.
+  propio harness había sembrado para el modo anterior. Una regla sembrada que quites
+  vuelve en el siguiente `upgrade`: es parte de lo que el harness instala. Para que un
+  permiso `allow` deje de aplicarse, agrega esa misma regla en `ask` o en `deny`, que
+  en Claude Code le ganan.
 
 ## Desarrollo
 
