@@ -685,7 +685,7 @@ def _setup_section(section, margins=True):
 def render(md_path, out_path, args):
     import tempfile
 
-    with open(md_path, "r", encoding="utf-8") as f:
+    with open(md_path, "r", encoding="utf-8-sig") as f:
         raw = f.read()
     meta, body = parse_front_matter(raw)
 

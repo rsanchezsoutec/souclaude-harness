@@ -27,6 +27,7 @@ Front-matter YAML-lite opcional al inicio del .md, entre '---':
 """
 import argparse
 import datetime
+import html
 import io
 import os
 import re
@@ -473,7 +474,10 @@ class SoutecDoc(BaseDocTemplate):
                     flowable._bkey = key
                 self.canv.bookmarkHorizontalAbsolute(key, self._anchor_top(flowable))
                 lvl = 1 if name == "H2" else 2
-                self.notify("TOCEntry", (lvl, flowable.getPlainText(), self.page, key))
+                # getPlainText() devuelve el texto ya sin escapar y el índice lo
+                # vuelve a interpretar como marcado: un título con «<» o «&»
+                # (p. ej. código en línea) se reinyectaba como etiquetas.
+                self.notify("TOCEntry", (lvl, html.escape(flowable.getPlainText()), self.page, key))
 
 
 # ============================================================
@@ -615,7 +619,7 @@ def render(md_path, out_path, args):
     global _TOTAL_PAGES
     _TOTAL_PAGES = None
 
-    with open(md_path, "r", encoding="utf-8") as f:
+    with open(md_path, "r", encoding="utf-8-sig") as f:
         raw = f.read()
     meta, body = parse_front_matter(raw)
 
