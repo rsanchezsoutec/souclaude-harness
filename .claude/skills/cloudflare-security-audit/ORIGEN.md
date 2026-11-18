@@ -28,6 +28,22 @@ Los archivos son los del origen, sin cambios, con estas excepciones:
   falta para usar la skill.
 - **Se agregan** `LICENSE` (el aviso MIT del origen) y este archivo.
 
+## Limitaciones conocidas
+
+- **La auditoría completa no cierra en Windows nativo.** Los dos validadores
+  (`validate-findings.cjs` y `validate-coverage-ledger.cjs`) exigen `O_NOFOLLOW` y
+  `O_NONBLOCK`, que Node no expone en Windows, y terminan con «OS no-follow and
+  nonblocking input protection is unavailable» ante cualquier archivo. Es un
+  comportamiento del origen (falla cerrado, a propósito) y no se parchea aquí. La
+  auditoría completa necesita Linux, macOS o WSL; el modo guía (preguntas y
+  revisiones puntuales) no usa los validadores y funciona igual en Windows. **No
+  se rodea el validador**: si no puede correr, se dice.
+- **La auditoría completa escribe fuera del repo**, por defecto en
+  `~/security-audit-skill/<repo>/run-<N>`. Ahí quedan los hallazgos, sin control
+  de versiones: es decisión del origen para que no se commiteen por accidente.
+- **Ejecutar código del repo auditado exige un sandbox del sistema operativo.**
+  Sin él, la skill no ejecuta nada y deja el hallazgo como `needs_validation`.
+
 ## Cómo actualizarla
 
 Se actualiza en el generador (`souclaude-harness`), no en cada repo: se vuelven a

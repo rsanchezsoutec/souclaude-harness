@@ -17,6 +17,8 @@ El harness y el CLI se versionan juntos.
     `it-security-review` ni con el `/security-review` nativo.
   - Los archivos son los del origen sin cambios, salvo el encabezado de `SKILL.md`;
     no se distribuyen los tests de los validadores.
+  - La auditoría completa necesita Linux, macOS o WSL: los validadores del origen
+    no corren en Windows nativo (ver `ORIGEN.md`). El modo guía sí funciona.
   - Un repo ya instalado la suma con `npx souclaude upgrade --skills <lista completa>` (la
     selección de skills existente no cambia sola).
 
