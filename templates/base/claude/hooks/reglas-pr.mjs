@@ -816,7 +816,8 @@ export function preDocsMetodologia(correr, { script = SCRIPT_DOCS, raizPush = RA
 }
 
 function estadoDe(r) {
-  if (r.status === 0) return 'OK'
+  // Un [AVISO] no cambia el resultado del grupo, pero se nota en la tabla.
+  if (r.status === 0) return /^\[AVISO\]/m.test(r.salida ?? '') ? 'OK, con avisos' : 'OK'
   if (r.status === 1) return 'FAIL'
   return 'ERROR (no se pudo verificar)'
 }
@@ -851,7 +852,7 @@ export function textoParaElAgente({ url, sha, resultados, errorComentario }) {
   const avisos = resultados.flatMap((r) =>
     r.salida
       .split('\n')
-      .filter((l) => /^\[(FAIL|skip|ERROR)/.test(l))
+      .filter((l) => /^\[(FAIL|skip|ERROR|AVISO)/.test(l))
       .map((l) => `  ${r.grupo} ${l}`),
   )
   if (avisos.length) {
@@ -880,6 +881,9 @@ export function textoParaElAgente({ url, sha, resultados, errorComentario }) {
     lineas.push(
       `Algun grupo no se pudo verificar (ERROR): cuando se resuelva, corre \`node .claude/hooks/reglas-pr.mjs --pr ${url}\`; si no se resuelve, avisale al usuario que el PR quedo sin validar.`,
     )
+  }
+  if (avisos.some((l) => l.includes('[AVISO]'))) {
+    lineas.push('Los [AVISO] no bloquean, pero revisalos: si es una credencial real, sacala en un commit nuevo y avisa al usuario para rotarla.')
   }
   if (!fallaBloqueante && !sinVerificar) lineas.push('Los grupos bloqueantes pasaron. rama-commits es informativo: no reescribas commits ya pusheados.')
   return { estado: fallaBloqueante ? 'fail' : sinVerificar ? 'error' : 'ok', texto: lineas.join('\n') }

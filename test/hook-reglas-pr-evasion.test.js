@@ -15,6 +15,8 @@ import {
   destinosDelPush,
   pushDelComando,
   cambioDePR,
+  comentario,
+  textoParaElAgente,
 } from '../templates/base/claude/hooks/reglas-pr.mjs'
 
 // El hook reglas-pr solo reconocia `git push` como PRIMERA palabra de un
@@ -420,4 +422,32 @@ test('hook real: el Vault sigue exento tambien con un destino incierto; su push 
   assert.equal(decision(dir, `cd "${vault}" && command git push origin main`), null)
   assert.equal(decision(dir, `bash -c 'cd "${vault}" && git push origin main'`), null)
   assert.equal(decision(dir, `git -C "${vault}" push origin main --force`)?.tipo, 'ask', 'nunca push --force, tampoco en el Vault')
+})
+
+// --- Avisos del check (no bloquean) ----------------------------------------------
+
+test('avisos del check: se ven en la tabla del PR y le llegan al agente, sin volverse un fallo', () => {
+  const resultados = [
+    {
+      grupo: 'secretos',
+      bloqueante: true,
+      status: 0,
+      salida: '[OK  ] sin-secretos: sin archivos de credenciales agregados\n[AVISO] sin-secretos-en-contenido: posible credencial en las lineas agregadas (informativo, no bloquea): clave privada en src/a.js:3.',
+    },
+    { grupo: 'pr-metadata', bloqueante: true, status: 0, salida: '[OK  ] base-dev: ok' },
+  ]
+  const tabla = comentario({ sha: 'abcdef1234', resultados })
+  assert.match(tabla, /\| secretos \| OK, con avisos \|/)
+  assert.match(tabla, /\| pr-metadata \| OK \|/)
+  assert.match(tabla, /\[AVISO\] sin-secretos-en-contenido/, 'el detalle va en la salida plegada del comentario')
+
+  const paraElAgente = textoParaElAgente({ url: 'https://github.com/o/r/pull/1', sha: 'abcdef1234', resultados, errorComentario: null })
+  assert.equal(paraElAgente.estado, 'ok', 'un aviso no es un fallo')
+  assert.match(paraElAgente.texto, /secretos \[AVISO\] sin-secretos-en-contenido/)
+  assert.match(paraElAgente.texto, /Los \[AVISO\] no bloquean, pero revisalos/)
+
+  // Sin avisos, nada de esto aparece.
+  const limpio = textoParaElAgente({ url: 'https://github.com/o/r/pull/1', sha: null, resultados: [resultados[1]], errorComentario: null })
+  assert.doesNotMatch(limpio.texto, /AVISO/)
+  assert.match(comentario({ sha: null, resultados: [resultados[1]] }), /\| pr-metadata \| OK \|/)
 })

@@ -18,6 +18,9 @@ import {
   esperaMergeable,
   ultimoTagDe,
   describeError,
+  secretosEnContenido,
+  evaluaContenido,
+  evaluaVersionDelPaquete,
 } from '../scripts/check-pr-rules.mjs'
 
 const SCRIPT = fileURLToPath(new URL('../scripts/check-pr-rules.mjs', import.meta.url))
@@ -423,4 +426,125 @@ test('--cabeza rechaza opciones de git, salvo --branches y --tags', () => {
   assert.ok(!fs.existsSync(path.join(dir, 'pwned.txt')))
   commitear(dir, { '.env.local': 'X=1\n' }, 'feat: x')
   assert.equal(correrCheck(dir, ['--grupo', 'secretos', '--sin-pushear', '--cabeza=--branches']).status, 1)
+})
+
+// --- Credenciales en el CONTENIDO (informativo) ---------------------------------
+// De mentira y armadas por partes: escritas enteras, este mismo archivo dispararia
+// el aviso -- y la proteccion de push de GitHub.
+const CLAVE_PRIVADA = ['-----BEGIN', 'RSA', 'PRIVATE', 'KEY-----'].join(' ')
+const CLAVE_AWS = 'AKIA' + 'IOSFODNN7' + 'EJEMPLO'
+const TOKEN_GITHUB = 'gh' + 'p_' + 'a1B2c3D4'.repeat(5)
+
+test('secretosEnContenido: solo lineas agregadas, con su archivo y su numero de linea', () => {
+  const diff = [
+    'diff --git a/src/config.js b/src/config.js',
+    'index 111..222 100644',
+    '--- a/src/config.js',
+    '+++ b/src/config.js',
+    '@@ -3,0 +4,2 @@',
+    `+const aws = "${CLAVE_AWS}"`,
+    '+const nada = 1',
+    '@@ -10 +12 @@',
+    `-const viejo = "${TOKEN_GITHUB}"`, // una linea QUITADA no cuenta
+    `+const gh = "${TOKEN_GITHUB}"`,
+    'diff --git a/borrado.pem b/borrado.pem',
+    '--- a/borrado.pem',
+    '+++ /dev/null',
+    '@@ -1 +0,0 @@',
+    `-${CLAVE_PRIVADA}`,
+    'diff --git a/docs/llave.txt b/docs/llave.txt',
+    '--- /dev/null',
+    '+++ b/docs/llave.txt',
+    '@@ -0,0 +1,2 @@',
+    `+${CLAVE_PRIVADA}`,
+    '+MIIEvQIBADANBgkq',
+  ].join('\n')
+  assert.deepEqual(secretosEnContenido(diff), [
+    { archivo: 'src/config.js', linea: 4, tipo: 'clave de acceso de AWS' },
+    { archivo: 'src/config.js', linea: 12, tipo: 'token de GitHub' },
+    { archivo: 'docs/llave.txt', linea: 1, tipo: 'clave privada' },
+  ])
+  assert.deepEqual(secretosEnContenido(''), [])
+})
+
+test('secretosEnContenido: reconoce los tokens con prefijo propio y no lo que solo se les parece', () => {
+  const tipos = (linea) => secretosEnContenido(['+++ b/a.txt', '@@ -0,0 +1 @@', `+${linea}`].join('\n')).map((h) => h.tipo)
+  assert.deepEqual(tipos('k = "' + 'sk-' + 'ant-' + 'api03-' + 'x'.repeat(30) + '"'), ['clave de API de Anthropic'])
+  assert.deepEqual(tipos('SLACK=' + 'xox' + 'b-' + '1234567890-abcdefghijkl'), ['token de Slack'])
+  assert.deepEqual(tipos('key: ' + 'AI' + 'za' + 'B'.repeat(35)), ['clave de API de Google'])
+  assert.deepEqual(tipos('//registry/:_authToken=' + 'npm' + '_' + 'a'.repeat(36)), ['token de npm'])
+  assert.deepEqual(tipos(['-----BEGIN', 'OPENSSH', 'PRIVATE', 'KEY-----'].join(' ')), ['clave privada'])
+  assert.deepEqual(tipos(['-----BEGIN', 'PRIVATE', 'KEY-----'].join(' ')), ['clave privada'])
+  for (const inocente of [
+    'AKIA' + 'CORTA123', // menos de 16 caracteres tras el prefijo
+    'gh' + 'p_corto',
+    'guarda tu PRIVATE KEY en un lugar seguro', // se habla de una clave, no hay ninguna
+    ['-----BEGIN', 'PUBLIC', 'KEY-----'].join(' '),
+    ['-----BEGIN', 'CERTIFICATE-----'].join(' '),
+    'const sk = "sk-proyecto-interno"',
+    'git push origin main',
+  ]) {
+    assert.deepEqual(tipos(inocente), [], inocente)
+  }
+})
+
+test('evaluaContenido: sin hallazgos no dice nada; con hallazgos avisa sin bloquear', () => {
+  assert.equal(evaluaContenido([]), null)
+  const r = evaluaContenido([{ archivo: 'src/config.js', linea: 4, tipo: 'clave de acceso de AWS' }])
+  assert.equal(r.cumple, null, 'no es un FAIL')
+  assert.equal(r.aviso, true)
+  assert.match(r.detalle, /clave de acceso de AWS en src\/config\.js:4/)
+  assert.match(r.detalle, /no bloquea/)
+  const muchos = evaluaContenido(Array.from({ length: 25 }, (_, i) => ({ archivo: 'a.txt', linea: i + 1, tipo: 'token de npm' })))
+  assert.equal(muchos.detalle.split('token de npm').length - 1, 20, 'lista como mucho 20')
+  assert.match(muchos.detalle, /y 5 mas/)
+})
+
+test('secretos: una credencial pegada en un archivo cualquiera se avisa, sin cambiar el resultado ni mostrarla', () => {
+  const dir = repoConBase()
+  commitear(dir, { 'src/config.js': `export const a = 1\nexport const clave = "${CLAVE_AWS}"\n`, 'docs/guia.md': 'texto\n' }, 'feat: config')
+
+  const r = correrCheck(dir, ['--grupo', 'secretos'])
+  assert.equal(r.status, 0, 'el aviso no cambia el codigo de salida')
+  assert.match(r.stdout, /^\[OK  \] sin-secretos: /m)
+  assert.match(r.stdout, /^\[AVISO\] sin-secretos-en-contenido: .*clave de acceso de AWS en src\/config\.js:2/m)
+  assert.ok(!r.stdout.includes(CLAVE_AWS), 'el check imprimio la credencial')
+
+  // Lo que corre el hook antes del push tambien lo ve.
+  const sinPushear = correrCheck(dir, ['--grupo', 'secretos', '--sin-pushear'])
+  assert.equal(sinPushear.status, 0)
+  assert.match(sinPushear.stdout, /^\[AVISO\] sin-secretos-en-contenido: .*src\/config\.js:2/m)
+
+  // Un archivo de credenciales sigue siendo FAIL, con o sin aviso de contenido.
+  commitear(dir, { '.env': 'X=1\n' }, 'feat: env')
+  const conArchivo = correrCheck(dir, ['--grupo', 'secretos'])
+  assert.equal(conArchivo.status, 1)
+  assert.match(conArchivo.stdout, /^\[FAIL\] sin-secretos: /m)
+})
+
+test('secretos: sin nada que avisar, la salida es la de siempre (una linea)', () => {
+  const dir = repoConBase()
+  commitear(dir, { 'a.txt': 'hola\n', 'src/b.js': 'export const b = 2\n' }, 'feat: a')
+  for (const args of [['--grupo', 'secretos'], ['--grupo', 'secretos', '--sin-pushear']]) {
+    const r = correrCheck(dir, args)
+    assert.equal(r.status, 0)
+    assert.deepEqual(r.stdout.trim().split('\n').map((l) => l.slice(0, 20)), ['[OK  ] sin-secretos:'], args.join(' '))
+  }
+})
+
+test('evaluaVersionDelPaquete: avisa si el release propone una version y package.json dice otra', () => {
+  const cuerpo = (marcaSi, linea) => `## Requiere versión / release\n\n- [${marcaSi ? ' ' : 'x'}] No\n- [${marcaSi ? 'x' : ' '}] Sí\n\n${linea}\n\n## Otra\n\ntexto\n`
+  const pr = { body: cuerpo(true, 'Versión sugerida: v3.19.0') }
+
+  const aviso = evaluaVersionDelPaquete(pr, 'main', () => '3.18.1')
+  assert.equal(aviso.aviso, true)
+  assert.equal(aviso.cumple, null, 'no es un FAIL')
+  assert.match(aviso.detalle, /propone v3\.19\.0 pero package\.json dice 3\.18\.1/)
+
+  assert.equal(evaluaVersionDelPaquete(pr, 'main', () => '3.19.0'), null, 'coinciden')
+  assert.equal(evaluaVersionDelPaquete(pr, 'dev', () => '3.18.1'), null, 'solo en el PR de release')
+  assert.equal(evaluaVersionDelPaquete(pr, 'main', () => { throw new Error('sin package.json') }), null, 'un repo que no es de Node')
+  assert.equal(evaluaVersionDelPaquete({ body: cuerpo(false, '') }, 'main', () => '3.18.1'), null, 'el release no requiere version')
+  assert.equal(evaluaVersionDelPaquete({ body: cuerpo(true, 'sin proponer nada') }, 'main', () => '3.18.1'), null, 'de eso ya se queja version-semver')
+  assert.equal(evaluaVersionDelPaquete(null, 'main', () => '3.18.1'), null)
 })

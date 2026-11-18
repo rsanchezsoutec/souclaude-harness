@@ -18,6 +18,11 @@
 //   pr-metadata   -> #5 base=dev, #6 mergeable, #8 version,
 //                    #9 secciones-PR                              (bloqueante)
 //
+// Ademas, dos AVISOS que nunca cambian el codigo de salida ni aparecen si no hay
+// nada que decir: posibles credenciales en el CONTENIDO de las lineas agregadas
+// (grupo secretos) y, en un PR dev -> main, una version sugerida distinta de la
+// de package.json (grupo pr-metadata).
+//
 // Uso:
 //   node scripts/check-pr-rules.mjs --grupo rama-commits [--pr <n|url>]
 //   node scripts/check-pr-rules.mjs --grupo secretos [--pr <n|url>]
@@ -79,6 +84,23 @@ const SECRETO_ARCHIVOS = [
   /(^|\/)credentials\.json$/,
   /(^|\/)secrets\.json$/,
 ]
+// Contenido: patrones de ALTA confianza -- cabeceras de clave privada y tokens
+// con prefijo propio -- sobre las lineas que se AGREGAN. No es un escaner de
+// secretos (para eso estan gitleaks o la proteccion de push de GitHub): es una
+// red para el descuido mas comun, pegar una credencial en un archivo cualquiera,
+// que el chequeo por nombre de archivo no puede ver. INFORMA, no bloquea: un
+// falso positivo (una clave de ejemplo en la documentacion) no debe trabar un
+// merge. Nunca imprime el valor: solo el tipo, el archivo y la linea.
+const SECRETO_CONTENIDO = [
+  ['clave privada', /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----/],
+  ['clave de acceso de AWS', /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/],
+  ['token de GitHub', /\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,})\b/],
+  ['clave de API de Anthropic', /\bsk-ant-[A-Za-z0-9_-]{24,}/],
+  ['token de Slack', /\bxox[abeprs]-[A-Za-z0-9-]{20,}/],
+  ['clave de API de Google', /\bAIza[0-9A-Za-z_-]{35}\b/],
+  ['token de npm', /\bnpm_[A-Za-z0-9]{36}\b/],
+]
+const MAX_HALLAZGOS_DE_CONTENIDO = 20
 
 // Sin prompts de credenciales: un check que se cuelga esperando un usuario
 // que no existe (hook, CI) es peor que uno que falla.
@@ -181,6 +203,26 @@ function archivosSinPushear(cabeza) {
   return rutas(['log', cabeza, '--not', '--remotes=origin', '--no-renames', '--diff-filter=A', '--name-only', '-z', '--format='])
 }
 
+// El texto de lo que se agrega o modifica, sin contexto (-U0): es lo que revisa
+// secretosEnContenido. Un diff gigante corta por maxBuffer y el chequeo de
+// contenido se informa como no revisado; nunca tumba el check.
+function diffDe(args) {
+  return execFileSync('git', ['-c', 'core.quotePath=false', ...args, '--no-renames', '--diff-filter=AM', '-U0', '--no-color', '--no-ext-diff'], {
+    encoding: 'utf8',
+    env: ENTORNO,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    maxBuffer: 64 * 1024 * 1024,
+  })
+}
+
+function diffAgregado(baseRef, cabeza) {
+  return diffDe(['diff', `${baseRef}..${cabeza}`])
+}
+
+function diffSinPushear(cabeza) {
+  return diffDe(['log', cabeza, '--not', '--remotes=origin', '-p', '--format='])
+}
+
 function tagsRemotos() {
   return sh(['git', 'ls-remote', '--tags', '--refs', 'origin'], { red: true })
     .split('\n')
@@ -276,6 +318,53 @@ export function evaluaSecretos(archivos, donde = 'agregados') {
   return { regla: 'sin-secretos', cumple: true, detalle: `sin archivos de credenciales ${donde}` }
 }
 
+// Hallazgos sobre la salida de `git diff -U0` (o `git log -p -U0`): solo las
+// lineas agregadas, con su archivo y su numero de linea en la version nueva.
+export function secretosEnContenido(diff) {
+  const hallazgos = []
+  let archivo = null
+  let linea = 0
+  for (const l of diff.split('\n')) {
+    if (l.startsWith('+++ ')) {
+      archivo = l.startsWith('+++ b/') ? l.slice(6) : null // /dev/null: el archivo se borra
+    } else if (l.startsWith('@@')) {
+      linea = Number(l.match(/^@@ -\d+(?:,\d+)? \+(\d+)/)?.[1] ?? 0)
+    } else if (archivo && l.startsWith('+')) {
+      for (const [tipo, patron] of SECRETO_CONTENIDO) {
+        if (patron.test(l.slice(1))) hallazgos.push({ archivo, linea, tipo })
+      }
+      linea++
+    } else if (l.startsWith(' ')) {
+      linea++
+    }
+  }
+  return hallazgos
+}
+
+// Sin hallazgos no devuelve nada (el check queda igual que siempre); con
+// hallazgos, un aviso que no cambia el codigo de salida.
+export function evaluaContenido(hallazgos, donde = 'agregadas') {
+  if (hallazgos.length === 0) return null
+  const lista = hallazgos.slice(0, MAX_HALLAZGOS_DE_CONTENIDO).map((h) => `${h.tipo} en ${h.archivo}:${h.linea}`)
+  const resto = hallazgos.length > MAX_HALLAZGOS_DE_CONTENIDO ? ` y ${hallazgos.length - MAX_HALLAZGOS_DE_CONTENIDO} mas` : ''
+  return {
+    regla: 'sin-secretos-en-contenido',
+    cumple: null,
+    aviso: true,
+    detalle: `posible credencial en las lineas ${donde} (informativo, no bloquea): ${lista.join('; ')}${resto}. Si es real, sacala y rotala: ya quedo en el historial.`,
+  }
+}
+
+// El chequeo de contenido nunca cambia el resultado del grupo: si no se puede
+// leer el diff, se dice y se sigue.
+function contenidoSinBloquear(leerDiff, donde) {
+  try {
+    return evaluaContenido(secretosEnContenido(leerDiff()), donde)
+  } catch (e) {
+    return { regla: 'sin-secretos-en-contenido', cumple: null, detalle: `no se pudo revisar el contenido (${describeError(e)})` }
+  }
+}
+
 function evaluaBaseDev(baseRefName, nombreRama) {
   if (baseRefName == null) {
     return { regla: 'pr-apunta-a-dev', cumple: null, detalle: 'no hay datos de PR (falta --pr o gh)' }
@@ -366,6 +455,31 @@ export function evaluaVersion(pr, baseRefName) {
   return { regla: 'version-semver', cumple: true, detalle: `${propuesta} > ${ultimo ?? '(sin tags previos)'}` }
 }
 
+// El tag del release sale de package.json (scripts/tag-release.mjs), no del
+// cuerpo del PR. Si no coinciden, el merge etiqueta otra version -- o ninguna, si
+// package.json no subio --. Se avisa ANTES del merge; no bloquea, y sin
+// package.json (un repo que no es de Node) no hay nada que comparar.
+export function evaluaVersionDelPaquete(pr, baseRefName, leerVersion) {
+  if (pr == null || baseRefName !== 'main') return null
+  const seccion = extraeSeccion(pr.body ?? '', 'Requiere versión / release')
+  if (seccion == null || !/- \[x\] S[ií]/i.test(seccion)) return null
+  const propuesta = seccion.match(/Versi[oó]n sugerida:\s*v(\d+\.\d+\.\d+)/i)?.[1]
+  if (!propuesta) return null
+  let enPaquete
+  try {
+    enPaquete = leerVersion()
+  } catch {
+    return null
+  }
+  if (typeof enPaquete !== 'string' || enPaquete === propuesta) return null
+  return {
+    regla: 'version-package-json',
+    cumple: null,
+    aviso: true,
+    detalle: `el PR propone v${propuesta} pero package.json dice ${enPaquete}: tag-release etiqueta lo que diga package.json. Sube "version" antes del merge o corrige la version sugerida (informativo, no bloquea).`,
+  }
+}
+
 function plantillaPR() {
   try {
     return readFileSync('.github/pull_request_template.md', 'utf8')
@@ -449,8 +563,10 @@ function evaluar(values) {
   if (values.grupo === 'secretos') {
     if (values['sin-pushear']) {
       resultados.push(evaluaSecretos(archivosSinPushear(values.cabeza || 'HEAD'), 'en commits sin pushear'))
+      resultados.push(contenidoSinBloquear(() => diffSinPushear(values.cabeza || 'HEAD'), 'de los commits sin pushear'))
     } else {
       resultados.push(cabeza ? evaluaSecretos(archivosAgregados(baseLocal, cabeza)) : sinCabeza('sin-secretos'))
+      if (cabeza) resultados.push(contenidoSinBloquear(() => diffAgregado(baseLocal, cabeza), 'agregadas'))
     }
   }
   if (values.grupo === 'pr-metadata') {
@@ -460,9 +576,10 @@ function evaluar(values) {
     resultados.push(evaluaBaseDev(pr?.baseRefName ?? null, rama))
     resultados.push(evaluaMergeable(pr))
     resultados.push(evaluaVersion(pr, pr?.baseRefName ?? null))
+    resultados.push(evaluaVersionDelPaquete(pr, pr?.baseRefName ?? null, () => JSON.parse(sh(['git', 'show', `${cabeza}:package.json`])).version))
     resultados.push(evaluaSeccionesCompletas(pr))
   }
-  return resultados
+  return resultados.filter(Boolean)
 }
 
 function main() {
@@ -501,7 +618,7 @@ function main() {
 
   let huboFalse = false
   for (const r of resultados) {
-    const marca = r.cumple === true ? 'OK  ' : r.cumple === false ? 'FAIL' : 'skip'
+    const marca = r.aviso ? 'AVISO' : r.cumple === true ? 'OK  ' : r.cumple === false ? 'FAIL' : 'skip'
     console.log(`[${marca}] ${r.regla}: ${r.detalle}`)
     if (r.cumple === false) huboFalse = true
   }

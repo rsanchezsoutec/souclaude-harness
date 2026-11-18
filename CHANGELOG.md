@@ -159,6 +159,14 @@ versión, ajustar a él el `to` de las dos migraciones nuevas y regenerar
   `$schema`. Un test comprueba que el manifest real y el lockfile que escribe `init`
   los cumplen y que sus listas de políticas y modos son las del código. Las reglas
   que dependen del disco siguen en `souclaude verify`.
+- **El check de secretos avisa de credenciales pegadas en el contenido**: cabeceras
+  de clave privada y tokens con prefijo propio (AWS, GitHub, Anthropic, Slack,
+  Google, npm) en las líneas que se agregan. Es informativo: no cambia el resultado
+  del check ni imprime el valor, y sin hallazgos la salida es la de siempre. El hook
+  lo muestra en la tabla del PR («OK, con avisos») y se lo pasa al agente. No
+  reemplaza a un escáner de secretos ni a la protección de push de GitHub.
+- **Aviso previo al merge del release**: si el PR `dev` → `main` propone una versión
+  y `package.json` dice otra, `pr-metadata` lo avisa antes del merge (no bloquea).
 - **Piso de cobertura**: `npm run test:cobertura` mide solo el código del repo
   (sin `test/`) y falla por debajo de 89 % de líneas, 79 % de ramas o 90 % de
   funciones (requiere Node >= 22.8). CI lo corre en una celda de la matriz, por
