@@ -267,7 +267,10 @@ function resolverPorRegistro(cwd, vaultPath, carpetas) {
 // maquinas a la vez -- en cuanto aparece el segundo. Lo retira T003, una vez que
 // la migracion de upgrade haya completado los vault.local.json viejos.
 export function carpetaProyecto(vaultPath, config) {
-  if (config?.project) return config.project
+  // `project` termina como segmento de ruta (sessions.md, tableros) y como
+  // argumento de `git add`: si no tiene la forma de una carpeta de proyecto
+  // (un "../algo", algo que empiece con "-"), es como si no estuviera declarado.
+  if (config?.project) return NOMBRE_PROYECTO.test(String(config.project)) ? config.project : null
   const carpetas = carpetasProyecto(vaultPath)
   return carpetas.length === 1 ? carpetas[0] : null
 }
