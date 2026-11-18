@@ -196,7 +196,7 @@ un PR.
 
 ## 5. Checklist final
 
-- [ ] `Vault/` es un repo git aparte, con `main` protegido para lo estratégico.
+- [ ] `Vault/` es un repo git aparte; su `main` se escribe por push directo, sin PR ni protección de rama (lo estratégico se cuida por convención, §4).
 - [ ] `00-System/` tiene `id-registry.md` (prefijos con dueño), `metodologia-roca.md` y
       `templates/plantilla_apertura_roca.yaml`.
 - [ ] Una `Project-<PREFIJO>/` por proyecto activo, cada una con `kanban.md` semilla.

@@ -2,6 +2,94 @@
 
 El harness y el CLI se versionan juntos.
 
+## [Sin publicar]
+
+Resultado de una auditoría completa del harness. Al publicar: poner el número de
+versión, ajustar a él el `to` de las dos migraciones nuevas y regenerar
+`docs/metodologia`.
+
+### Seguridad
+
+- **El hook `reglas-pr` y los scripts de `scripts/` dejaban de correr, en silencio y
+  con exit 0, si se invocaban por una ruta con un enlace simbólico** (un proyecto
+  abierto por un symlink o junction, `/tmp` y `/var` en macOS): la guarda de «soy el
+  script de entrada» comparaba `import.meta.url` contra `process.argv[1]` tal cual,
+  y Node resuelve los enlaces del script de entrada. Con eso, la protección de
+  `main` y el check de secretos quedaban apagados sin aviso, y un check de CI podía
+  salir verde sin haber corrido. Ahora se comparan rutas reales.
+- **El hook ve el `git push` aunque venga envuelto, agrupado o anidado**
+  (`command git push`, `env … git push`, `(git push)`, `if …; then git push; fi`,
+  `bash -c "…"`, `eval`, `xargs`, `iex`): antes solo lo reconocía como primera
+  palabra del segmento, y `command`/`time`/`nohup` además casan con la regla allow
+  `Bash(git push:*)`, así que ese push a `main` pasaba sin pregunta. Cuando el
+  destino no se puede leer del comando (`$RAMA`, `$(…)`, un comodín, un alias de git
+  en línea) el hook **pregunta** (`ask`) en vez de dejarlo pasar; `$(git branch
+  --show-current)` se resuelve como la rama actual.
+- **El push forzado se pregunta en modo equipo esté donde esté el flag**
+  (`git push origin x --force`, `-uf`, `+refspec`, `--force-with-lease`): las reglas
+  `ask` de `settings.json` son de prefijo y solo veían el flag justo después de
+  `git push`.
+- **El check de secretos ya no se evade renombrando**: `git mv notas.txt .env`
+  figuraba como renombrado (R) y el filtro solo miraba agregados (A). Se suman las
+  llaves privadas SSH (`id_rsa`, `id_ed25519`…) y los `.p12`.
+- **Nada se lee, escribe ni borra fuera del repo**: una clave `../algo` en
+  `.claude/harness.json` (que se commitea y llega por PR) hacía que `--prune` borrara
+  ese archivo sin confirmar. Las rutas del lockfile y del manifest se validan, y
+  `apply()` se niega a aplicar un plan que se salga del repo.
+- **`--force` pide tipear `FORCE`**, como prometían el README y el `--help`: no
+  existía, y `upgrade --force --yes` sobrescribía archivos editados sin confirmación
+  escrita. `--yes` no la implica y en CI se deniega.
+- **Ninguna plantilla ni mensaje del CLI manda ya a correr `npx souclaude`**: fuera
+  de este repo, npx busca ese nombre en el registro público, donde no es del harness
+  y está libre para registrar. Quedaban 19 apariciones; un test lo impide de ahora
+  en adelante. Se usa `npx github:soutecdev/souclaude-harness#v3` o el CLI global.
+- `git clone` del Vault lleva `--` antes de la URL (venía de un flag o del lockfile);
+  el `fetch` de límites del monitor no sigue redirecciones con el token puesto.
+- `settings.json` deniega también la lectura de `.env` en subcarpetas
+  (`Read(./**/.env)`), y el `.gitignore` emitido ignora cualquier `.env.*` salvo las
+  plantillas (`.env.example`…), igual que el check de secretos.
+
+### Corregido
+
+- **«Un archivo tuyo nunca se sobrescribe en silencio» ahora vale también si el
+  archivo no se puede leer.** Un error de lectura (archivo abierto por otro programa,
+  retenido por el antivirus, placeholder de OneDrive sin conexión) se trataba como
+  «no existe» y el motor escribía encima, sin `.new` y sin backup. El plan se
+  detiene antes de escribir nada.
+- **El CI de todo PR de release (`dev` → `main`) salía rojo**: dos tests heredaban
+  `GITHUB_BASE_REF=main` del evento y fallaban en sus repos temporales. El de
+  v3.18.1 se fusionó así.
+- **La suite ya no depende de la máquina**: no llama a `gh` con la sesión real del
+  desarrollador (103 invocaciones; pasa de ~54 s a ~7 s), no depende de que haya una
+  terminal (dos tests de color fallaban con la salida por tubería en macOS/Linux) ni
+  de `NO_COLOR`.
+- Un `settings.json` guardado con BOM (PowerShell 5.1) abortaba el upgrade; un
+  `.claude/harness.json` con marcadores de conflicto de git se trataba como «repo sin
+  harness» sin avisar. El primero se tolera; el segundo es un error claro.
+- Ajustar el `timeout` de un hook del harness hacía que el siguiente upgrade lo
+  registrara por duplicado (corría dos veces). Los grupos de hooks se reconocen por
+  tool + comando.
+- El hook de SessionStart se registraba con una ruta relativa y sin plazo: si la
+  sesión había cambiado de carpeta, el de un resume/clear/compact no encontraba el
+  script. Pasa a `${CLAUDE_PROJECT_DIR}` con plazo de 60 s (migración incluida).
+- El git del Vault (`vault-sync`, publicación del monitor) tiene plazo y no espera
+  credenciales cuando nadie puede contestar: un pull colgado bloqueaba para siempre.
+- Con `--prune`, lo borrado se respalda siempre y el respaldo se informa (con
+  `--no-backup` se copiaba igual pero no se decía).
+- La prosa de skills, `CLAUDE.md`, README y MAINTAINERS que seguía dando GitHub
+  Actions por pausado (pendiente desde 3.18.1), el comentario que el hook publica en
+  cada PR, y «Node ≥ 20» donde el requisito real es 22.4. Los `CLAUDE.md` ya
+  instalados se corrigen en el lugar con una migración.
+
+### Agregado
+
+- `souclaude verify` valida el contrato del manifest entry por entry (policy,
+  modos, `when`, skill, rutas, binarios sin `binary: true`, seeds JSON inválidos).
+- Test que exige que las copias de este repo (`.claude/`, `scripts/`, workflows)
+  sean idénticas a su template, y macOS en la matriz de CI.
+- `npm run check`, `npm run verify`, `npm run docs:check`, `npm run test:cobertura`;
+  `.gitattributes` y `.editorconfig`.
+
 ## [3.18.1] — 2026-11-10
 
 ### Cambiado

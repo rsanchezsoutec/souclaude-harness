@@ -1,15 +1,18 @@
 // Hook de Claude Code del harness (managed): reglas de PR en la sesion (SHS-M39)
 // y proteccion de `main` por repo (SHS-M42).
 //
-// Con GitHub Actions en pausa (SHS-M36), los checks de
-// scripts/check-pr-rules.mjs ya no corren en CI: los corre este hook dentro de
-// la sesion del agente, en el momento en que importan.
+// Los checks de scripts/check-pr-rules.mjs corren en CI (workflows reglas-*) y,
+// antes, aca: dentro de la sesion del agente, en el momento en que importan.
 //
 //   PreToolUse  · git push              -> (1) deniega el push que toca `main` de
 //                                          cualquier repo que no sea el Vault ni
 //                                          este en modo solo; (2) grupo secretos
 //                                          sobre los commits que el push subiria;
-//                                          si falla, deniega el push.
+//                                          si falla, deniega el push; (3) pregunta
+//                                          al usuario (`ask`) si el destino no se
+//                                          puede leer del comando (variables,
+//                                          xargs, alias) o si el push es forzado
+//                                          (esto ultimo, solo en modo equipo).
 //   PostToolUse · gh pr create / edit   -> los tres grupos contra el PR, un
 //                                          comentario con el resultado en el PR
 //                                          (la evidencia para el revisor) y el
@@ -29,6 +32,12 @@
 // secretos no aplica en repos sin scripts/check-pr-rules.mjs (el Vault, por
 // ejemplo). En modo solo corre solo el check de secretos antes del push: cubre
 // tambien los merges directos a dev/main, que en solo no pasan por ningun PR.
+//
+// Limite: el hook lee el TEXTO del comando. Ve el push a traves de envoltorios
+// (`command git push`), agrupaciones (`(git push)`) y comandos anidados (`bash
+// -c`, `eval`), pero no el que hace un script (`./deploy.sh`), un alias
+// configurado en git o una llamada a la API (`gh api`). Es una red para el
+// error honesto; la barrera de `main` es la proteccion de rama en GitHub.
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -741,7 +750,7 @@ export function comentario({ sha, resultados }) {
     MARCA,
     '### Reglas de PR — corridas en la sesión del agente',
     '',
-    `GitHub Actions está en pausa (SHS-M36): estos checks los corre el hook \`reglas-pr\` de Claude Code (SHS-M39) sobre \`${sha ? sha.slice(0, 7) : '?'}\`.`,
+    `Checks corridos por el hook \`reglas-pr\` de Claude Code (SHS-M39) sobre \`${sha ? sha.slice(0, 7) : '?'}\`, en la sesión del agente. Los workflows \`reglas-*\` de GitHub Actions validan el mismo PR en CI.`,
     '',
     '| Grupo | Resultado |',
     '|---|---|',

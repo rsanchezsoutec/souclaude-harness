@@ -6,12 +6,12 @@
 // este script): #7 no esta documentada en el skill, #10 no aplica a este repo.
 //
 // Las 7 reglas se agrupan en tres --grupo (SHS-M33): un fallo de formato de
-// commit no debe verse igual de grave que un secreto filtrado. Mientras GitHub
-// Actions esta en pausa (SHS-M36) no las corre CI: las corre el hook de Claude
-// Code reglas-pr (.claude/hooks/reglas-pr.mjs, SHS-M39) en la sesion del
-// agente. "Bloqueante" = el hook deniega el push o le devuelve el FAIL al
-// agente (y, con Actions activo, github-protect.js lo exige como check
-// requerido); "informativo" = se reporta, pero no frena nada.
+// commit no debe verse igual de grave que un secreto filtrado. Las corren los
+// workflows reglas-*.yml en CI y, antes, el hook de Claude Code reglas-pr
+// (.claude/hooks/reglas-pr.mjs, SHS-M39) en la sesion del agente.
+// "Bloqueante" = el hook deniega el push o le devuelve el FAIL al agente, y
+// github-protect.js lo exige como check requerido de main; "informativo" = se
+// reporta, pero no frena nada.
 //
 //   rama-commits  -> #1 rama-formato, #2 commits-formato          (informativo)
 //   secretos      -> #3 sin-secretos                              (bloqueante)

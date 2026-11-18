@@ -21,6 +21,17 @@ export function harnessDocsUrl(rel) {
   return `${base}/blob/main/${rel}`
 }
 
+// Como invocar al instalador desde un repo consumidor: SIEMPRE con el repo de
+// GitHub y el tag movil de la serie, nunca `npx souclaude`. Fuera de este repo
+// npx busca ese nombre corto en el registro publico de npm, donde no es el del
+// harness (el paquete se llama souclaude-harness y no se publica) y esta libre:
+// quien lo registre ejecuta su codigo en la maquina de quien siga la instruccion.
+export function comandoNpx() {
+  const { repository, version } = JSON.parse(fs.readFileSync(PACKAGE_JSON, 'utf8'))
+  const slug = repository.url.replace(/^git\+/, '').replace(/\.git$/, '').replace(/^https:\/\/github\.com\//, '')
+  return `npx github:${slug}#v${String(version).split('.')[0]}`
+}
+
 // La config del Vault es de MAQUINA, no de proyecto: la ruta local difiere en
 // cada equipo. Por eso no va al lockfile (.claude/harness.json se commitea) ni
 // al .env (los agentes lo tienen denegado por permissions.deny en
@@ -310,7 +321,7 @@ function manualHint(repo) {
     [
       'El repo quedo sin Vault conectado. Para conectarlo despues:',
       `    git clone ${repo} <ruta>`,
-      '    npx souclaude upgrade --vault-path <ruta>',
+      `    ${comandoNpx()} upgrade --vault-path <ruta>`,
       `Detalle en ${harnessDocsUrl('docs/vault-setup.md')}`,
     ].join('\n')
   )

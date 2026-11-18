@@ -34,9 +34,7 @@ Estas no se negocian, ni siquiera en un hotfix.
 - **Nunca crear repositorios.** Eso es del coordinador. Los **tags de versión**
   (`vX.Y.Z` y el tag móvil por major) se crean únicamente al publicar, después
   del merge del PR de release `dev` → `main`: los crea el workflow
-  `tag-release.yml` o, en repos sin ese workflow, el agente.
-  **PAUSA TEMPORAL (SHS-M36)**: mientras GitHub Actions esté en pausa,
-  `tag-release.yml` no se dispara y los tags los crea siempre el agente (ver
+  `tag-release.yml` o, en repos sin ese workflow, el agente (ver
   "Versionamiento"). El **GitHub Release** tampoco es del coordinador: se crea
   solo al mergearse el PR de release, con su descripción corta (ver "Cierre del
   release").
@@ -186,10 +184,10 @@ Antes de pedir revisión:
 - El README está actualizado si aplica.
 - El PR indica si requiere versión/release.
 
-**Los checks de PR corren en la sesión, con el hook `reglas-pr`.**
-PAUSA TEMPORAL (SHS-M36): con GitHub Actions en pausa, los checks de
-`scripts/check-pr-rules.mjs` no corren en CI. Los corre, solo, un hook de
-**Claude Code** (`.claude/hooks/reglas-pr.mjs`, SHS-M39 — no es un git hook):
+**Los checks de PR corren en la sesión, con el hook `reglas-pr`, y otra vez en
+CI, con los workflows `reglas-*`.** El hook es de **Claude Code**
+(`.claude/hooks/reglas-pr.mjs`, SHS-M39 — no es un git hook), corre los mismos
+checks de `scripts/check-pr-rules.mjs` y te da el resultado antes que CI:
 
 - **Antes de cada `git push`, la rama** (SHS-M42): si el push toca `main` de un
   repo que no es el Vault (ni está en modo solo), queda denegado: `main` solo
@@ -284,9 +282,6 @@ arrastrar checks en rojo por fallos transitorios que conviene reintentar. Detect
 fallidos con `gh pr checks <pr>` y relánzalos con `gh run rerun <run-id> --failed` —
 solo los jobs en estado `failure`, no el run completo. Si no hay jobs fallidos, edita
 el body y no hagas nada más: no re-corras lo que ya está en verde ni informes de sobra.
-PAUSA TEMPORAL (SHS-M36): mientras GitHub Actions esté en pausa no hay runs que
-relanzar (`gh pr checks` sale vacío); el check lo vuelve a correr el hook
-`reglas-pr` al editar el body.
 
 Integración: **squash & merge**, y la hace el coordinador. Para un `refactor/` grande o
 una migración, el coordinador puede optar por merge commit y lo registra en el PR.
@@ -321,9 +316,9 @@ crea/pushea el tag inmutable `vX.Y.Z` y el tag móvil de la serie (`v3`) — es
 idempotente: si el tag ya existe, no falla ni duplica. En repos sin el workflow,
 el agente los crea y pushea en el mismo momento.
 
-**PAUSA TEMPORAL (SHS-M36)**: mientras GitHub Actions esté en pausa,
-`tag-release.yml` no se dispara y los tags los creas tú al publicar, después del
-merge del release, con el mismo script:
+Si el workflow no corrió (un repo sin `tag-release.yml`, Actions deshabilitado,
+o el tag no aparece unos minutos después del merge), créalos tú con el mismo
+script:
 
 ```bash
 git fetch origin && node scripts/tag-release.mjs --ref origin/main
@@ -415,7 +410,7 @@ subagente lo dice una vez y sigue con el resto: nada de esto bloquea el release.
 (`.claude/vault.local.json` existe y apunta a un Vault válido). Sin Vault no hay
 ficha y no hay nada que mantener.
 
-`npx souclaude` siembra `Project-<PREFIJO>/OBSERVATORIO.md` en el Vault desde la
+El instalador siembra `Project-<PREFIJO>/OBSERVATORIO.md` en el Vault desde la
 plantilla canónica (`00-System/templates/OBSERVATORIO.md`). Reglas sobre ella:
 
 - **Al instalar el harness**: si ya tienes contexto del proyecto — por la
@@ -528,9 +523,9 @@ plantilla canónica (`00-System/templates/OBSERVATORIO.md`). Reglas sobre ella:
     ciegas.
   Si "Próxima versión" queda vacía después, déjala vacía con su comentario guía
   de la plantilla; no borres la sección.
-- **Al confirmarse el merge y el tag** (mientras Actions esté en pausa, el tag
-  lo creas tú: ver "Versionamiento"; todo este cierre lo hace el subagente de
-  "Cierre del release"): verifica el hito y corrige fecha o resumen si difieren
+- **Al confirmarse el merge y el tag** (el tag y el GitHub Release los crea
+  `tag-release.yml`, ver "Versionamiento"; todo este cierre lo hace el subagente
+  de "Cierre del release"): verifica el hito y corrige fecha o resumen si difieren
   de lo publicado. Si el PR de release se rechaza o se
   descarta, elimina el hito en la sesión que lo detecte y restaura en "Próxima
   versión" cualquier línea que hayas quitado o editado creyendo que este

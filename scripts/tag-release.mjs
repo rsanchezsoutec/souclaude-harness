@@ -2,8 +2,8 @@
 // Tag de release, según la sección "Versionamiento" de la skill soutec-github:
 // tras el merge dev -> main se crea el tag inmutable vX.Y.Z y se mueve el tag
 // móvil vX. Lo corre el workflow tag-release.yml (pull_request cerrado y
-// mergeado con base main) o, mientras GitHub Actions está en pausa (SHS-M36),
-// el agente después del merge de release (SHS-M39):
+// mergeado con base main) o, si el workflow no corrió, el agente después del
+// merge de release (SHS-M39):
 //
 //   git fetch origin && node scripts/tag-release.mjs --ref origin/main
 //
@@ -11,7 +11,7 @@
 // a él: no hace falta cambiar de rama ni tocar el árbol de trabajo. Sin --ref,
 // usa el package.json del árbol y HEAD (el checkout de main del workflow).
 //
-// No crea el GitHub Release: eso sigue siendo del coordinador (ver skill).
+// No crea el GitHub Release: eso lo hace scripts/release-publicar.mjs.
 // Es idempotente: si vX.Y.Z ya existe (alguien lo taggeó a mano), no falla
 // ni duplica -- solo reporta y sale 0.
 //

@@ -17,7 +17,7 @@ de SOUTEC cuidan que se registre bien.**
 
 ## Día 1 — setup
 
-1. Ten **git** y **Node ≥ 20** instalados.
+1. Ten **git** y **Node ≥ 22.4** instalados.
 2. Clona el repo en el que vas a trabajar. Si ya tiene una carpeta `.claude/` y un
    `CLAUDE.md`, **ya tiene el harness**: no hace falta nada más.
 3. Si arrancas un repo desde cero (o uno viejo sin harness), instálalo:

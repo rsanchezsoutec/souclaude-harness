@@ -68,3 +68,91 @@ test('lockfile dañado: error que lo nombra, en vez de tratar al repo como "sin 
   write(dir, '.claude/harness.json', original)
   assert.equal(await main(['upgrade', ...YES], dir), 0)
 })
+
+// --- Textos que el harness instala o imprime ------------------------------------
+
+// Decision ya tomada por el propio repo (CHANGELOG 3.14.1) y que no se habia
+// terminado de aplicar: fuera de este repo, `npx souclaude` no trae el harness,
+// trae lo que haya en el registro publico de npm con ese nombre -- que no es
+// nuestro y cualquiera puede registrar. Este test es el candado.
+test('ninguna plantilla ni mensaje del CLI manda a correr `npx souclaude` (nombre corto)', async () => {
+  const fs = await import('node:fs')
+  const path = await import('node:path')
+  const { fileURLToPath } = await import('node:url')
+  const raiz = fileURLToPath(new URL('..', import.meta.url))
+  const PERMITIDAS = [
+    /no uses `npx souclaude`/, // la advertencia misma (progress/README.md)
+    /'`npx souclaude vault-sync --push -m "docs: worklog"`'/, // el texto viejo que una migracion reemplaza
+    /^\s*\/\//, // comentarios del codigo que explican por que no se usa
+  ]
+  const hallazgos = []
+  const recorrer = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const abs = path.join(dir, e.name)
+      if (e.isDirectory()) recorrer(abs)
+      else if (/\.(md|mjs|js|json|yml|txt|example)$/.test(e.name)) {
+        fs.readFileSync(abs, 'utf8').split('\n').forEach((linea, i) => {
+          if (/npx souclaude(?!-harness)/.test(linea) && !PERMITIDAS.some((p) => p.test(linea))) {
+            hallazgos.push(`${path.relative(raiz, abs)}:${i + 1}`)
+          }
+        })
+      }
+    }
+  }
+  recorrer(path.join(raiz, 'templates'))
+  recorrer(path.join(raiz, 'src'))
+  assert.deepEqual(hallazgos, [], `usa la forma con el repo (npx github:soutecdev/souclaude-harness#v3) o el CLI global: ${hallazgos.join(', ')}`)
+})
+
+test('comandoNpx: siempre el repo de GitHub con el tag movil de la serie', async () => {
+  const { comandoNpx } = await import('../src/core/vault.js')
+  assert.match(comandoNpx(), /^npx github:soutecdev\/souclaude-harness#v\d+$/)
+})
+
+test('el comentario que el hook reglas-pr publica en los PR ya no afirma que Actions esta en pausa', async () => {
+  const { comentario } = await import('../templates/base/claude/hooks/reglas-pr.mjs')
+  const texto = comentario({ sha: 'abcdef1234', resultados: [{ grupo: 'secretos', bloqueante: true, status: 0, salida: '[OK  ] sin-secretos' }] })
+  assert.doesNotMatch(texto, /en pausa|SHS-M36/)
+  assert.match(texto, /abcdef1/)
+  assert.match(texto, /reglas-\*/)
+})
+
+// El CLAUDE.md de equipo que emitieron 3.14-3.18 le dice al agente que Actions
+// esta en pausa. Es user-owned y casi siempre esta editado: sin migracion, el
+// upgrade solo dejaria un .new y la instruccion falsa seguiria mandando.
+test('upgrade: los pasajes de "Actions en pausa" del CLAUDE.md se corrigen en el lugar, sin tocar lo del usuario', async () => {
+  const VIEJO_TAGS = [
+    '  Los **tags de versión** (`vX.Y.Z` + tag móvil por major) sí puedo crearlos, solo al',
+    '  publicar y después del merge de release `dev` → `main`: mientras GitHub Actions',
+    '  esté en pausa (SHS-M36), con `git fetch origin && node scripts/tag-release.mjs',
+    '  --ref origin/main`.',
+  ].join('\n')
+  const VIEJO_CHECKS = '- **Checks de PR en la sesión** (Actions en pausa, SHS-M36): el hook `reglas-pr` de'
+  const { writeLockfile } = await import('../src/core/lockfile.js')
+
+  for (const eol of ['\n', '\r\n']) {
+    const dir = mkRepo({ 'package.json': '{"name":"acme"}\n' })
+    assert.equal(await main(['init', ...YES], dir), 0)
+    const nuevo = read(dir, 'CLAUDE.md')
+    const inicioTags = nuevo.indexOf('  Los **tags de versión**')
+    const finTags = nuevo.indexOf('--ref origin/main`.') + '--ref origin/main`.'.length
+    assert.ok(inicioTags > 0 && finTags > inicioTags)
+    // Asi lo dejo instalado una version anterior, mas una regla que agrego el equipo.
+    const instalado = (nuevo.slice(0, inicioTags) + VIEJO_TAGS + nuevo.slice(finTags))
+      .replace('- **Checks de PR en la sesión** (además de los workflows `reglas-*` de CI): el hook `reglas-pr` de', VIEJO_CHECKS)
+      .concat('\n## Reglas del equipo\n\n- Una regla nuestra.\n')
+      .replaceAll('\n', eol)
+    assert.match(instalado, /en pausa \(SHS-M36\)/)
+    write(dir, 'CLAUDE.md', instalado)
+    writeLockfile(dir, { ...readLockfile(dir), harnessVersion: '3.18.1' })
+
+    assert.equal(await main(['upgrade', ...YES], dir), 0)
+    const despues = read(dir, 'CLAUDE.md')
+    assert.doesNotMatch(despues, /en pausa|SHS-M36/, 'la instruccion falsa sobrevivio al upgrade')
+    assert.match(despues, /los crea el workflow\r?\n  `tag-release\.yml`/)
+    assert.match(despues, /además de los workflows `reglas-\*` de CI/)
+    assert.ok(despues.includes('## Reglas del equipo\n\n- Una regla nuestra.'), 'se perdio la edicion del equipo')
+    assert.ok(!despues.includes('\r\n'), 'el motor escribe siempre LF, tambien al migrar un archivo que estaba en CRLF')
+    assert.ok(!has(dir, 'CLAUDE.md.new'), 'el template no cambio: no corresponde un .new')
+  }
+})

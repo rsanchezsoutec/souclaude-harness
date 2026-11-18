@@ -27,7 +27,7 @@ export async function status(flags, cwd) {
 
   if (!lock) {
     ui.log.warn('Este repo no tiene harness (.claude/harness.json no existe).')
-    ui.log.info('Corre `souclaude init` para instalarlo, o `souclaude adopt` si ya tenes una estructura hecha a mano.')
+    ui.log.info('Corre `souclaude init` para instalarlo, o `souclaude adopt` si ya tienes una estructura hecha a mano.')
   } else {
     ui.log.info(`Harness instalado: v${lock.harnessVersion} · disponible: v${manifest.harnessVersion}`)
   }

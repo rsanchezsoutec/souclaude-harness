@@ -230,7 +230,7 @@ function main() {
   const lineas = ultimasLineasWorklog(path.join(vaultPath, proyecto, 'worklog.md'))
   if (lineas == null) {
     salida.push(
-      `${proyecto}/worklog.md no existe todavia: crealo con la linea del primer bloque (npx souclaude upgrade tambien lo siembra).`
+      `${proyecto}/worklog.md no existe todavia: crealo con la linea del primer bloque (el upgrade del harness tambien lo siembra).`
     )
   } else {
     salida.push(

@@ -24,8 +24,8 @@ progress/                     progreso del proyecto y protocolo del Vault
   settings.json               permisos, effort y registro de hooks (schema-correcto)
   harness.json                lockfile: versión + hash + skills elegidas
   hooks/                      de Claude Code: milestone al iniciar la sesión y
-                              reglas-pr (checks de PR en la sesión mientras
-                              Actions está en pausa)
+                              reglas-pr (protección de `main`, secretos y checks
+                              de PR en la sesión, antes de CI)
   skills/                     las que elijas en el checkbox de init
     soutec-github             flujo Git/GitHub (obligatoria, se instala siempre)
     it-security-review        security review para IT
@@ -81,6 +81,8 @@ quedan marcados obsoletos y `--prune` ofrece borrarlos.
 | `souclaude status` | Solo lectura. Exit 0 = al día · 1 = hay upgrade · 2 = drift. |
 | `souclaude adopt` | Para una estructura hecha a mano. **No toca ningún archivo**: solo escribe el lockfile. |
 | `souclaude monitor` | Panel de consumo de tokens de Claude Code. |
+| `souclaude vault-sync` | Pull/push seguro del Vault. Exit 0 = ok · 1 = falló · 2 = uso incorrecto · 3 = sin Vault. |
+| `souclaude verify` | Audita el propio harness (manifest vs `templates/base/`). Es lo que corre el CI. |
 
 Sin comando, se autodetecta: hay lockfile → `upgrade` · hay estructura previa →
 `adopt` · repo limpio → `init`.
@@ -146,7 +148,7 @@ Flags útiles:
 | `--ascii` | Fuerza glifos ASCII (equivale a `SOUCLAUDE_ASCII=1`). |
 | `--no-refresh` | No consulta los límites de plan a la API. Sin este flag, el monitor le pega a `GET /api/oauth/usage` (el mismo endpoint que usa Claude Code) porque el caché de `~/.claude.json` solo se reescribe cuando el humano corre `/usage` — medido: cero refrescos en 12 minutos de actividad continua. Con `--no-refresh` el panel muestra la edad real del último dato en caché en vez de fingir que está al día. |
 | `--claude-home <ruta>` | Usa otra carpeta `~/.claude` (útil para fixtures y tests). También desactiva el refresco de red de los límites (ver abajo), porque un fixture no tiene credenciales reales que leer. |
-| `--publish` | Publica un snapshot agregado de esta cuenta en el Vault (ver "Multi-cuenta"). Opt-in, solo panel en vivo. |
+| `--publish` | Publica en el Vault el snapshot de la cuenta, la línea de `sessions.md` y el registro de consumo por sesión (ver "Multi-cuenta"). Con Vault configurado es el **default**; `--no-publish` lo apaga. Solo panel en vivo. |
 
 El refresco de red de los límites de plan (Ventana 5h/7d, Semanal por modelo, Extra) se
 desactiva en **tres** casos, no solo con `--no-refresh`: con `--no-refresh` explícito, en
@@ -281,14 +283,17 @@ lockfile que había, y qué querría emitir el harness hoy.
 | está, intacto | está | sí | se actualiza (no pierdes nada: no lo habías tocado) |
 | está, **editado por ti** | está | no | se respeta, no se toca |
 | está, **editado por ti** | está | sí | **nunca se pisa** → `.new` al lado |
-| está | está, ya no en el manifest | — | obsoleto: se ofrece con `--prune` + doble confirmación |
+| está | está, ya no en el manifest | — | obsoleto: `--prune` lo borra (con backup); si lo editaste, antes pide tipear `BORRAR` |
+| está, **no se puede leer** | — | — | el comando se detiene **antes de escribir nada** (no se trata como ausente) |
 
 Por eso init, adopción de un repo legacy y migración de versión **son el mismo code
 path**. No hay tres flujos: hay una tabla.
 
-Además: backup de todo lo sobrescrito en `.claude/backup-<timestamp>/`, `--prune` exige
-tipear `BORRAR`, y `--force` exige tipear `FORCE`. Nada destructivo ocurre sin
-confirmación explícita.
+Además: backup de todo lo sobrescrito o borrado en `.claude/backup-<timestamp>/`;
+`--prune` borra sin preguntar solo los obsoletos que no editaste y exige tipear
+`BORRAR` para los que sí; `--force` exige tipear `FORCE`. `--yes` nunca implica esas
+dos confirmaciones y en CI se deniegan. Nada se lee, escribe ni borra fuera del
+repo, diga lo que diga el lockfile.
 
 Para los dos archivos que el harness no posee del todo:
 - `.gitignore` — solo es dueño de un bloque delimitado. Tus líneas nunca se tocan.
@@ -336,10 +341,10 @@ El detalle de cada versión vive en `CHANGELOG.md`. Los hitos:
 
 `main` solo recibe merges desde `dev`: el trabajo entra a `dev` por PR de rama, y el
 release es un **PR de `dev` a `main`** (con la versión propuesta en el cuerpo). Tras
-ese merge, **el agente puede crear y pushear los tags** — no hace falta esperar al
-coordinador. Mientras GitHub Actions esté en pausa (SHS-M36) `tag-release.yml` no se
-dispara, así que los crea siempre el agente, con el mismo script (tag anotado
-`vX.Y.Z` y `v3` movido al mismo commit; idempotente, sin cambiar de rama):
+ese merge, el workflow `tag-release.yml` crea el tag `vX.Y.Z`, mueve `v3` y crea el
+GitHub Release — no hace falta esperar al coordinador. Si el workflow no corrió,
+el agente lo hace con el mismo script (tag anotado `vX.Y.Z` y `v3` movido al mismo
+commit; idempotente, sin cambiar de rama):
 
 ```bash
 git fetch origin && node scripts/tag-release.mjs --ref origin/main

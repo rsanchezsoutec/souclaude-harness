@@ -121,6 +121,42 @@ export const migrations = [
       return changed ? stringifyJson(json) : content
     },
   },
+  {
+    // GitHub Actions se reactivo en 3.18.1 (SHS-M45), pero el CLAUDE.md del modo
+    // equipo emitido por 3.14-3.18 sigue diciendole al agente que esta en pausa:
+    // que los tags los crea siempre el y que los checks de PR solo corren en la
+    // sesion. Es user-owned y casi siempre esta editado, asi que el upgrade solo
+    // le dejaria un .new que nadie mira. Reemplazo literal de los dos pasajes que
+    // escribio el harness; si el usuario los reescribio, no coinciden y no se
+    // tocan. La busqueda tolera CRLF (el archivo en disco puede tenerlo); el
+    // motor escribe siempre LF. `to` es el primer release que la incluye.
+    id: 'v3-claude-md-actions-reactivado',
+    to: '3.19.0',
+    dest: 'CLAUDE.md',
+    describe: 'CLAUDE.md: GitHub Actions ya no está en pausa — se corrigen los dos pasajes que escribió el harness (tags de versión y checks de PR)',
+    transform(content) {
+      const literal = (texto) => new RegExp(texto.split('\n').map((l) => l.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\r?\\n'))
+      const PASAJES = [
+        [
+          '  Los **tags de versión** (`vX.Y.Z` + tag móvil por major) sí puedo crearlos, solo al\n' +
+            '  publicar y después del merge de release `dev` → `main`: mientras GitHub Actions\n' +
+            '  esté en pausa (SHS-M36), con `git fetch origin && node scripts/tag-release.mjs\n' +
+            '  --ref origin/main`.',
+          '  Los **tags de versión** (`vX.Y.Z` + tag móvil por major) los crea el workflow\n' +
+            '  `tag-release.yml` al mergearse el release `dev` → `main`; si no corrió o el repo\n' +
+            '  no lo tiene, los creo yo con `git fetch origin && node scripts/tag-release.mjs\n' +
+            '  --ref origin/main`.',
+        ],
+        [
+          '- **Checks de PR en la sesión** (Actions en pausa, SHS-M36): el hook `reglas-pr` de',
+          '- **Checks de PR en la sesión** (además de los workflows `reglas-*` de CI): el hook `reglas-pr` de',
+        ],
+      ]
+      let out = content
+      for (const [viejo, nuevo] of PASAJES) out = out.replace(literal(viejo), () => nuevo)
+      return out
+    },
+  },
 ]
 
 // Devuelve las migraciones aplicables a `dest` para pasar de `fromVersion` al

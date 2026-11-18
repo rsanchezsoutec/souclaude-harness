@@ -340,7 +340,7 @@ cinco años, o uno con una versión vieja del harness. Se distribuye sin registr
 npx github:soutecdev/souclaude-harness#v3
 ```
 
-Solo hace falta git y Node ≥20. **El harness y las skills son project-local**: se commitean
+Solo hace falta git y Node ≥22.4. **El harness y las skills son project-local**: se commitean
 con el repo, quien clona los tiene, y el `upgrade` los mantiene al día proyecto por proyecto.
 (Elección deliberada frente a skills globales: una skill global no se puede actualizar por
 proyecto, lo que dejaría al motor de migración sin nada que migrar.)

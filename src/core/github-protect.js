@@ -106,7 +106,7 @@ export function protegeBranchMain({ cwd }) {
     )
     const checks = CHECKS_REQUERIDOS.length
       ? `+ checks ${CHECKS_REQUERIDOS.map((c) => `"${c}"`).join(' y ')} en verde`
-      : '(sin checks requeridos: Actions en pausa, SHS-M36)'
+      : '(sin checks requeridos)'
     ui.log.success(`Branch protection de "${RAMA_PROTEGIDA}" en ${repo}: PR obligatorio ${checks}.`)
     return { aplicado: true }
   } catch (err) {
