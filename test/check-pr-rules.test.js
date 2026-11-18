@@ -313,7 +313,17 @@ function commitear(dir, archivos, mensaje) {
   git(dir, 'commit', '-q', '-m', mensaje)
 }
 
-function correrCheck(dir, args, env = process.env) {
+// El script lee GITHUB_BASE_REF y GITHUB_HEAD_REF, que Actions define en los
+// eventos pull_request. Heredarlas hacia que el resultado dependiera del PR que
+// disparaba el CI: en el PR de release (base main) estos repos temporales, que
+// solo tienen dev, daban "[ERROR]" (exit 2) y el CI salia rojo en TODO release
+// dev -> main. Cada test fija el contexto que necesita; del entorno no hereda el
+// del evento.
+const ENTORNO_SIN_EVENTO = Object.fromEntries(
+  Object.entries(process.env).filter(([k]) => !/^GITHUB_(BASE|HEAD)_REF$/i.test(k))
+)
+
+function correrCheck(dir, args, env = ENTORNO_SIN_EVENTO) {
   try {
     const stdout = execFileSync(process.execPath, [SCRIPT, ...args], { cwd: dir, encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] })
     return { status: 0, stdout }
@@ -359,7 +369,7 @@ test('secretos: una ruta con tildes se detecta y .env.example no', () => {
 test('pr-metadata sin gh disponible: [ERROR] y exit 2, no un FAIL de regla', () => {
   const dir = repoConBase()
   const vacio = fs.mkdtempSync(path.join(os.tmpdir(), 'souclaude sin gh '))
-  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k.toUpperCase() !== 'PATH'))
+  const env = Object.fromEntries(Object.entries(ENTORNO_SIN_EVENTO).filter(([k]) => k.toUpperCase() !== 'PATH'))
   env.PATH = vacio
   const r = correrCheck(dir, ['--grupo', 'pr-metadata', '--pr', '1'], env)
   assert.equal(r.status, 2, r.stdout)
