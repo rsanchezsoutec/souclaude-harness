@@ -1,10 +1,11 @@
+import fs from 'node:fs'
 import path from 'node:path'
 import * as ui from '../ui.js'
 import { loadManifest } from '../core/manifest.js'
 import { resolveDetected } from '../core/detect.js'
 import { readLockfile } from '../core/lockfile.js'
 import { readIfExists } from '../core/fsx.js'
-import { computePlan, writeActions, NOOP, LOCAL_EDIT } from '../core/plan.js'
+import { computePlan, writeActions, NOOP, LOCAL_EDIT, CONFLICT, FOREIGN } from '../core/plan.js'
 import { avisoCliDesactualizado } from '../core/version-remota.js'
 import { resolveVars, avisarIgnorados } from './_shared.js'
 
@@ -40,18 +41,51 @@ export async function status(flags, cwd) {
 
   checkSettings(cwd)
 
-  const pending = writeActions(plan.actions)
+  // Una propuesta `.new` que ya esta escrita y al dia no es trabajo para
+  // `upgrade`: volver a correrlo la reescribiria igual. Contarla como "pendiente"
+  // dejaba a status en exit 1 ("hay upgrade") PARA SIEMPRE en cualquier repo con
+  // un archivo propio que el harness no pisa (su README, un CLAUDE.md editado), y
+  // mandaba a correr un upgrade que no cambia nada. Es una decision del usuario:
+  // cuenta como drift (exit 2), igual que una edicion local.
+  const propuestas = writeActions(plan.actions).filter((a) => propuestaAlDia(cwd, a))
+  const pending = writeActions(plan.actions).filter((a) => !propuestas.includes(a))
   const drift = plan.actions.filter((a) => a.verdict === LOCAL_EDIT)
   const clean = plan.actions.filter((a) => a.verdict === NOOP)
 
   if (!pending.length) {
-    ui.outro(`Al dia. ${clean.length} archivo(s) intactos, ${drift.length} con ediciones locales.`)
-    return drift.length ? 2 : 0
+    if (propuestas.length) {
+      ui.log.info(
+        `${propuestas.length} propuesta(s) .new esperan tu revision: ${propuestas.map((a) => a.writePath).join(', ')}.\n` +
+          'Integra lo que te sirva en tu archivo y borra el .new: `souclaude upgrade` no tiene nada nuevo que escribir.'
+      )
+    }
+    const conPropuesta = propuestas.length ? `, ${propuestas.length} con una propuesta .new sin resolver` : ''
+    ui.outro(`Al dia. ${clean.length} archivo(s) intactos, ${drift.length} con ediciones locales${conPropuesta}.`)
+    return drift.length || propuestas.length ? 2 : 0
   }
 
   ui.log.warn(`${pending.length} cambio(s) pendiente(s). Corre: souclaude upgrade`)
   ui.outro('Hay un upgrade disponible.')
   return 1
+}
+
+// La accion propone un `<archivo>.new` (conflicto, o archivo que el harness no
+// genero) y esa propuesta ya esta en disco con el contenido que `upgrade`
+// escribiria ahora. Si falta o quedo vieja, sigue siendo trabajo pendiente.
+function propuestaAlDia(cwd, action) {
+  if (![CONFLICT, FOREIGN].includes(action.verdict) || action.writePath === action.dest) return false
+  const abs = path.join(cwd, ...action.writePath.split('/'))
+  try {
+    if (action.binary) return Buffer.compare(fs.readFileSync(abs), Buffer.from(action.content)) === 0
+    // Misma normalizacion que writeFileLF: LF y salto de linea final.
+    const lf = (texto) => {
+      const n = String(texto).replace(/\r\n/g, '\n')
+      return n.endsWith('\n') ? n : `${n}\n`
+    }
+    return lf(fs.readFileSync(abs, 'utf8')) === lf(action.content)
+  } catch {
+    return false
+  }
 }
 
 function checkSettings(cwd) {

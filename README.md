@@ -85,7 +85,7 @@ quedan marcados obsoletos y `--prune` ofrece borrarlos.
 |---|---|
 | `souclaude init` | Instala. Sirve igual en un repo vacío y en uno con 5 años de código. |
 | `souclaude upgrade` | Actualiza a la última versión. Aplica migraciones. |
-| `souclaude status` | Solo lectura. Exit 0 = al día · 1 = hay upgrade · 2 = drift. |
+| `souclaude status` | Solo lectura. Exit 0 = al día · 1 = hay upgrade · 2 = drift (ediciones locales o propuestas `.new` sin resolver). |
 | `souclaude adopt` | Para una estructura hecha a mano. **No toca ningún archivo**: solo escribe el lockfile. |
 | `souclaude monitor` | Panel de consumo de tokens de Claude Code. |
 | `souclaude vault-sync` | Pull/push seguro del Vault. Exit 0 = ok · 1 = falló · 2 = uso incorrecto · 3 = sin Vault. |

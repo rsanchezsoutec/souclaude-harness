@@ -116,6 +116,13 @@ versión, ajustar a él el `to` de las dos migraciones nuevas y regenerar
   Si falta una dependencia, lo dice con el paquete a instalar en vez de un
   traceback, y `--to pdf` ya no exige `python-docx`. La skill indica un entorno
   virtual y deja de sugerir `--break-system-packages`.
+- **`souclaude status` ya no dice «hay un upgrade disponible» para siempre.** Una
+  propuesta `.new` ya escrita y al día contaba como cambio pendiente: en cualquier
+  repo con un archivo propio que el harness no pisa (su README, un `CLAUDE.md`
+  editado) `status` salía con 1 y mandaba a correr un `upgrade` que no tenía nada
+  nuevo que escribir. Ahora cuenta como drift (exit 2, igual que una edición local)
+  y `status` dice qué propuestas esperan revisión. Si el `.new` falta o quedó
+  viejo, sigue siendo un cambio pendiente (exit 1).
 
 ### Agregado
 
