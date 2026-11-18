@@ -17,7 +17,11 @@
   },
   "scripts": {
     "test": "node --test",
-    "test:ci": "node --test --test-concurrency=1"
+    "test:ci": "node --test --test-concurrency=1",
+    "test:cobertura": "node --test --experimental-test-coverage",
+    "verify": "node bin/cli.mjs verify --strict",
+    "docs:check": "node scripts/gen-docs-metodologia.mjs --check",
+    "check": "npm run verify && npm test"
   },
   "dependencies": {
     "@clack/prompts": "^0.11.0",
