@@ -140,6 +140,10 @@ async function pedirUtilizacion(doFetch, token, timeoutMs) {
         Accept: 'application/json',
       },
       signal: controller.signal,
+      // El token solo viaja al host de ENDPOINT: una redireccion (endpoint
+      // interno y no documentado, puede cambiar) se trata como un fallo mas en
+      // vez de seguirla con la cabecera Authorization puesta.
+      redirect: 'error',
     })
 
     // 401 incluido: se trata como un fallo mas. No renovamos el token.

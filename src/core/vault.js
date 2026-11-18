@@ -298,7 +298,10 @@ export function vaultRemote(abs) {
 // llamador degrada a warning: el Vault nunca bloquea la instalacion.
 export function cloneVault(repo, dest) {
   fs.mkdirSync(path.dirname(dest), { recursive: true })
-  git(['clone', repo, dest], { stdio: 'inherit' })
+  // "--": la URL sale de un flag, del manifest o de vars.VAULT_REPO del lockfile
+  // (que se commitea y llega por PR). Sin el separador, un valor que empiece con
+  // "-" (--upload-pack=..., --config=...) se leeria como opcion de git clone.
+  git(['clone', '--', repo, dest], { stdio: 'inherit' })
   return dest
 }
 
