@@ -140,6 +140,13 @@ test('destinosDelPush: lo que el shell resuelve al ejecutar viaja como incierto,
   assert.match(incierto('git push origin %RAMA%'), /%RAMA%/)
   assert.match(incierto('echo main | xargs git push origin'), /xargs/)
   assert.match(incierto('git -c alias.p=push p origin main'), /alias/)
+  // Una expresion entre parentesis completa los argumentos: el push queda sin
+  // refspec a la vista, pero NO es "push de la rama actual".
+  assert.match(incierto('git push origin (Get-Content rama.txt)', 'powershell'), /parentesis/)
+  assert.match(incierto('git push origin @(Get-Content rama.txt)', 'powershell'), /parentesis/)
+  assert.match(incierto('git push origin (Get-Content rama.txt) --force', 'powershell'), /parentesis/)
+  assert.equal(incierto('(git push origin fix/M1-x)'), null, 'un subshell que envuelve al push entero no lo vuelve incierto')
+  assert.equal(incierto('git push origin fix/M1-x && (cd otro && ls)'), null)
   // Lo literal no es incierto.
   for (const literal of ['git push', 'git push origin fix/M1-x', 'git push -u origin HEAD', 'git push origin HEAD:refs/heads/x', 'git push origin @{u}', 'git push origin v3.18.1', 'git -c user.name=x push origin x']) {
     assert.equal(incierto(literal), null, literal)
@@ -239,6 +246,9 @@ test('hook real: si el destino no se puede leer del texto, pregunta en vez de de
     assert.match(d.motivo, /no se puede saber a que rama sube este push/, comando)
   }
   assert.equal(decision(dir, 'git push origin $env:RAMA', { toolName: 'PowerShell' })?.tipo, 'ask')
+  for (const comando of ['git push origin (Get-Content rama.txt)', 'git push origin @(Get-Content rama.txt)', 'git push origin (Get-Content rama.txt) --force']) {
+    assert.equal(decision(dir, comando, { toolName: 'PowerShell' })?.tipo, 'ask', comando)
+  }
 })
 
 test('hook real: el push forzado se pregunta en modo equipo, este donde este el flag', () => {

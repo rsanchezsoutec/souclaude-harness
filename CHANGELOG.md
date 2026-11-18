@@ -41,8 +41,8 @@ versión, ajustar a él el `to` de las dos migraciones nuevas y regenerar
   escrita. `--yes` no la implica y en CI se deniega.
 - **Ninguna plantilla ni mensaje del CLI manda ya a correr `npx souclaude`**: fuera
   de este repo, npx busca ese nombre en el registro público, donde no es del harness
-  y está libre para registrar. Quedaban 19 apariciones; un test lo impide de ahora
-  en adelante. Se usa `npx github:soutecdev/souclaude-harness#v3` o el CLI global.
+  y está libre para registrar. Quedaban 16 líneas que lo nombraban; un test lo
+  impide de ahora en adelante. Se usa `npx github:soutecdev/souclaude-harness#v3` o el CLI global.
 - `git clone` del Vault lleva `--` antes de la URL (venía de un flag o del lockfile);
   el `fetch` de límites del monitor no sigue redirecciones con el token puesto.
 - `settings.json` deniega también la lectura de `.env` en subcarpetas

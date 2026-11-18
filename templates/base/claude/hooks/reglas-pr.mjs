@@ -65,6 +65,14 @@ const GRUPOS = [
 // `git commit -m "x; git push"` es un solo segmento. Las redirecciones (2>&1,
 // &>) no son operadores.
 export function segmentos(comando, shell = 'bash') {
+  return segmentosConCorte(comando, shell).map((s) => s.texto)
+}
+
+// Lo mismo, con el dato de como termino cada segmento. `abre` = lo corto un
+// parentesis de apertura: lo que sigue (`git push origin (Get-Content rama.txt)`
+// en PowerShell, `git push origin $(...)` en bash) es una expresion cuyo
+// resultado completa los argumentos, y no se puede leer del texto.
+export function segmentosConCorte(comando, shell = 'bash') {
   const escape = shell === 'powershell' ? '`' : '\\'
   const salida = []
   let actual = ''
@@ -86,14 +94,14 @@ export function segmentos(comando, shell = 'bash') {
       actual += c
     } else if (c === ';' || c === '\n' || c === '\r' || c === '&' || c === '|' || c === '(' || c === ')') {
       if ((c === '&' || c === '|') && comando[i + 1] === c) i++
-      salida.push(actual)
+      salida.push({ texto: actual, abre: c === '(' })
       actual = ''
     } else {
       actual += c
     }
   }
-  salida.push(actual)
-  return salida.map((s) => s.trim()).filter(Boolean)
+  salida.push({ texto: actual, abre: false })
+  return salida.map((s) => ({ texto: s.texto.trim(), abre: s.abre })).filter((s) => s.texto)
 }
 
 // Palabras de un segmento, sin comillas. Descarta las redirecciones (2>&1,
@@ -251,7 +259,7 @@ const SUSTITUCION_DE_LA_RAMA_ACTUAL = new RegExp(String.raw`\$\(\s*${NOMBRE_DE_L
 
 function* pushes(comando, cwd, shell = 'bash', nivel = 0) {
   let carpeta = cwd
-  for (const segmento of segmentos(comando.replace(SUSTITUCION_DE_LA_RAMA_ACTUAL, 'HEAD'), shell)) {
+  for (const { texto: segmento, abre } of segmentosConCorte(comando.replace(SUSTITUCION_DE_LA_RAMA_ACTUAL, 'HEAD'), shell)) {
     const { p, viaXargs } = comandoEfectivo(palabras(segmento, shell))
     if (ES_CD.test(p[0] ?? '')) {
       carpeta = carpetaTrasCd(carpeta, p.slice(1).find((x) => !x.startsWith('-')))
@@ -284,7 +292,12 @@ function* pushes(comando, cwd, shell = 'bash', nivel = 0) {
       if (alias) yield { dir, args: [], incierto: 'usa un alias de git definido en la misma linea' }
       continue
     }
-    yield { dir, args: p.slice(i + 1), incierto: viaXargs ? 'sus argumentos llegan por xargs' : null }
+    const incierto = viaXargs
+      ? 'sus argumentos llegan por xargs'
+      : abre
+        ? 'parte de sus argumentos sale de una expresion entre parentesis'
+        : null
+    yield { dir, args: p.slice(i + 1), incierto }
   }
 }
 
