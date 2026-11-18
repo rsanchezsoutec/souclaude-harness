@@ -30,10 +30,17 @@ function isPlainObject(v) {
   return v != null && typeof v === 'object' && !Array.isArray(v)
 }
 
+// El BOM inicial (lo escriben Windows PowerShell 5.1 con -Encoding UTF8 y varios
+// editores de Windows) es un JSON invalido para JSON.parse: un settings.json
+// guardado asi abortaba el upgrade entero con un "Unexpected token" ilegible.
+export function sinBom(content) {
+  return typeof content === 'string' && content.charCodeAt(0) === 0xfeff ? content.slice(1) : content
+}
+
 export function parseJson(content, dest) {
   if (content == null) return null
   try {
-    return JSON.parse(content)
+    return JSON.parse(sinBom(content))
   } catch (err) {
     throw new Error(`${dest} no es JSON valido: ${err.message}`)
   }

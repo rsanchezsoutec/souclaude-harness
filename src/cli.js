@@ -126,7 +126,13 @@ export async function main(argv, cwd) {
     return 0
   }
 
-  const command = positionals[0] ?? autoDetect(cwd)
+  let command
+  try {
+    command = positionals[0] ?? autoDetect(cwd)
+  } catch (err) {
+    ui.log.error(err.message)
+    return 1
+  }
 
   if (!(command in COMMANDS)) {
     console.error(pc.red(`Comando desconocido: ${command}`))
