@@ -82,7 +82,9 @@ Después: `npm test`, y **sube la versión** (receta 6) para que `status` marque
 
 1. Crea el template en `templates/base/<ruta>`. **Los dotfiles se guardan sin el punto**
    (`templates/base/gitignore`, no `.gitignore`) y el nombre real va en `dest`.
-2. Agrega una entrada en `templates/harness.manifest.json` → `files[]`:
+2. Agrega una entrada en `templates/harness.manifest.json` → `files[]` (la forma de cada entrada está en
+   `schemas/harness.manifest.schema.json`; el manifest lo declara en `$schema`, así que el
+   editor valida y autocompleta mientras escribes):
    ```json
    { "id": "mi-doc", "src": "base/docs/mi-doc.md", "dest": "docs/mi-doc.md",
      "render": true, "policy": "managed" }

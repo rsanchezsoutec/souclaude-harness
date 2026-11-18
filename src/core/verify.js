@@ -157,7 +157,7 @@ export function findMissingCriticalFiles(manifest, root = TEMPLATES_DIR) {
   return errors
 }
 
-const POLITICAS = ['managed', 'user-owned', 'append-block', 'merge-json']
+export const POLITICAS = ['managed', 'user-owned', 'append-block', 'merge-json']
 
 // El contrato del manifest, entry por entry. No hay JSON Schema ni tipos: sin
 // esto, una policy mal tipeada caia al `default` de desiredContent (se trataba

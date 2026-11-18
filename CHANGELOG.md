@@ -154,6 +154,11 @@ versión, ajustar a él el `to` de las dos migraciones nuevas y regenerar
   GitHub. Sin él, en modo equipo la reescriben entera en cada corrida.
 - Pruebas de la skill `soutec-md-a-pdf` (`test/python/`, solo biblioteca estándar)
   enganchadas a la suite, y tabla de variables de entorno en el README.
+- **Esquemas JSON del manifest y del lockfile** (`schemas/`): el contrato de forma
+  que el editor usa para validar y autocompletar; el manifest lo declara en
+  `$schema`. Un test comprueba que el manifest real y el lockfile que escribe `init`
+  los cumplen y que sus listas de políticas y modos son las del código. Las reglas
+  que dependen del disco siguen en `souclaude verify`.
 - **Piso de cobertura**: `npm run test:cobertura` mide solo el código del repo
   (sin `test/`) y falla por debajo de 89 % de líneas, 79 % de ramas o 90 % de
   funciones (requiere Node >= 22.8). CI lo corre en una celda de la matriz, por
