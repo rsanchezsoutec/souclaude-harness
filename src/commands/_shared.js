@@ -283,6 +283,14 @@ export async function vaultStep({ code, cwd, flags, manifest, lock }) {
 export function githubProtectionStep({ code, cwd, flags, protege = protegeBranchMain }) {
   if (code !== 0) return code
   if (flags['dry-run']) return code
+  // Opt-out explicito: protegeBranchMain hace un PUT que REEMPLAZA la proteccion
+  // existente (aprobaciones requeridas, revision de CODEOWNERS, otros checks
+  // obligatorios). Un repo cuya proteccion administra la organizacion, o que ya
+  // tiene reglas mas estrictas, tiene que poder decir que no.
+  if (flags['github-protect'] === false) {
+    ui.log.info('--no-github-protect: no se toca la proteccion de main en GitHub.')
+    return code
+  }
   if ((readLockfile(cwd)?.modo ?? 'equipo') === 'solo') {
     ui.log.info('Modo solo: no se configura branch protection de main.')
     return code

@@ -69,10 +69,12 @@ edita `templates/` y, si hace falta, una línea en el manifest.
 Editas `templates/base/<ruta>` y listo. El efecto en repos ya instalados depende de la
 **política** del archivo (ver [Cómo funciona](#cómo-funciona-por-detrás)):
 
-- **`managed`** (skills, comandos, templates SDD): el `upgrade` lo sobrescribe solo si el
+- **`managed`** (skills, hooks, workflows, scripts): el `upgrade` lo sobrescribe solo si el
   usuario no lo tocó. Es lo normal para todo lo que el harness "posee".
-- **`user-owned`** (`CLAUDE.md`, constitución, `notes.md`, PR template, CODEOWNERS): en un
-  repo ya instalado **no se pisa**; el dev recibe un `.new`. Cámbialo sabiendo eso.
+- **`user-owned`** (`CLAUDE.md`, `notes.md`, PR template, CODEOWNERS, `jira.json`,
+  `azdo.json`): mientras siga intacto se actualiza igual que un `managed`; en cuanto el
+  dev lo edita (lo habitual) **no se pisa** y recibe un `.new`. Cámbialo sabiendo eso:
+  para que una corrección llegue a un archivo ya editado hace falta una migración.
 
 Después: `npm test`, y **subí la versión** (receta 6) para que `status` marque el upgrade.
 
@@ -187,7 +189,7 @@ evita que `autocrlf` de git y los editores de Windows marquen todo como "modific
 | Política | Significado |
 |---|---|
 | `managed` | El harness manda. Se sobrescribe solo si el hash en disco coincide con el lockfile. |
-| `user-owned` | Se siembra una vez y **nunca más se toca**. Si el template cambió, se escribe `.new`. |
+| `user-owned` | Pensado para que el usuario lo edite. Intacto, se actualiza; una vez editado **nunca se pisa**: si el template cambió, se escribe `.new`. |
 | `append-block` | El harness es dueño de un bloque delimitado dentro del archivo (`.gitignore`). Tus líneas no se tocan. |
 | `merge-json` | Solo **agrega** claves que faltan (`settings.json`). Nunca pisa un valor que escribiste. |
 

@@ -48,6 +48,21 @@ versión, ajustar a él el `to` de las dos migraciones nuevas y regenerar
 - `settings.json` deniega también la lectura de `.env` en subcarpetas
   (`Read(./**/.env)`), y el `.gitignore` emitido ignora cualquier `.env.*` salvo las
   plantillas (`.env.example`…), igual que el check de secretos.
+- **El hook de inicio de sesión muestra el contenido del Vault como dato**:
+  rotulado, sin caracteres de control ni invisibles, en una línea y acotado a 240
+  caracteres. Antes inyectaba las tarjetas tal cual en el contexto de la sesión de
+  todo el equipo. Un `project` de `vault.local.json` que no sea una carpeta
+  `Project-<PREFIJO>` ya no se usa como ruta (ni en los hooks ni en el CLI).
+- **El hook pregunta antes de borrar `dev` en el remoto** (`git push origin
+  --delete dev`, `:dev`) en modo equipo: casaba con la regla allow de `git push`.
+- **Skill `soutec-md-a-pdf`**: del HTML crudo del Markdown solo pasa el marcado
+  conocido, y el `href` de un enlace va escapado (antes, un `href` con comillas
+  cerraba la etiqueta e inyectaba otra, p. ej. un `<img src="file://…">`). El
+  texto de los títulos se escapa antes de volver a entrar al índice.
+- **Monitor**: lo que se lee del registro compartido del Vault entra saneado
+  (`--usage` lo imprimía tal cual en la terminal) y con los números validados;
+  una sesión sin carpeta de trabajo conocida ya no publica como «proyecto» la ruta
+  local codificada (lo pedía el ADR 20260820).
 
 ### Corregido
 
@@ -80,6 +95,20 @@ versión, ajustar a él el `to` de las dos migraciones nuevas y regenerar
   Actions por pausado (pendiente desde 3.18.1), el comentario que el hook publica en
   cada PR, y «Node ≥ 20» donde el requisito real es 22.4. Los `CLAUDE.md` ya
   instalados se corrigen en el lugar con una migración.
+- **Monitor**: reintentar una publicación tras un `push` fallido duplicaba la
+  línea en `sessions.md` y en `usage/*.jsonl`, y cada actualización de una sesión
+  añadía una línea en blanco al final del archivo. Una respuesta 200 del endpoint
+  de límites con otra forma se tomaba como «límites vacíos» y le ganaba 5 minutos
+  al caché válido: ahora cuenta como fallo, y al caché propio solo llegan los
+  cuatro campos conocidos. Pulsar Ctrl+C dos veces seguidas no salía del panel.
+- **Skill `soutec-md-a-pdf`**: una lista anidada tumbaba el render (`TypeError`);
+  ahora se aplana, con un guion por nivel. Un título como «2026 Roadmap» perdía el
+  número; los títulos con `&` o comillas salían con entidades (`&amp;`); un enlace
+  relativo o de ancla abortaba el PDF (sale como texto); un archivo con BOM no
+  encontraba su título; un comentario en el front-matter quedaba dentro del valor.
+  Si falta una dependencia, lo dice con el paquete a instalar en vez de un
+  traceback, y `--to pdf` ya no exige `python-docx`. La skill indica un entorno
+  virtual y deja de sugerir `--break-system-packages`.
 
 ### Agregado
 
@@ -89,6 +118,10 @@ versión, ajustar a él el `to` de las dos migraciones nuevas y regenerar
   sean idénticas a su template, y macOS en la matriz de CI.
 - `npm run check`, `npm run verify`, `npm run docs:check`, `npm run test:cobertura`;
   `.gitattributes` y `.editorconfig`.
+- `--no-github-protect`: `init`/`upgrade` no tocan la protección de `main` en
+  GitHub. Sin él, en modo equipo la reescriben entera en cada corrida.
+- Pruebas de la skill `soutec-md-a-pdf` (`test/python/`, solo biblioteca estándar)
+  enganchadas a la suite, y tabla de variables de entorno en el README.
 
 ## [3.18.1] — 2026-11-10
 

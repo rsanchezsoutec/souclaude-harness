@@ -156,3 +156,19 @@ test('upgrade: los pasajes de "Actions en pausa" del CLAUDE.md se corrigen en el
     assert.ok(!has(dir, 'CLAUDE.md.new'), 'el template no cambio: no corresponde un .new')
   }
 })
+
+// protegeBranchMain REEMPLAZA la proteccion existente de `main` en cada init y
+// upgrade del modo equipo. No habia forma de decirle que no.
+test('--no-github-protect: init/upgrade no tocan la proteccion de main', async () => {
+  const { githubProtectionStep } = await import('../src/commands/_shared.js')
+  const dir = mkRepo({ 'package.json': '{"name":"acme"}\n' })
+  assert.equal(await main(['init', ...YES], dir), 0)
+  let llamadas = 0
+  const protege = () => { llamadas += 1 }
+  assert.equal(githubProtectionStep({ code: 0, cwd: dir, flags: {}, protege }), 0)
+  assert.equal(llamadas, 1, 'por defecto, en modo equipo, la proteccion se configura')
+  assert.equal(githubProtectionStep({ code: 0, cwd: dir, flags: { 'github-protect': false }, protege }), 0)
+  assert.equal(llamadas, 1, 'con --no-github-protect no se llama a GitHub')
+  // El flag existe en el CLI (parseArgs es estricto) y no altera el resto del comando.
+  assert.equal(await main(['upgrade', ...YES, '--no-github-protect'], dir), 0)
+})

@@ -54,7 +54,7 @@ Estas no se negocian. Si te acuerdas solo de esto, ya evitas el 90% de los probl
 1. Tomas una tarjeta del kanban del Vault (y la mueves a En curso en ese momento)
 2. Creas la rama                 ──►  feature/login-usuarios
 3. Trabajas con Claude, commits chicos y frecuentes
-4. Abres el PR draft tras 2-3 commits (no al final)
+4. Con el trabajo terminado y verificado, el agente te pregunta si abre el PR
 5. El coordinador revisa y hace el squash & merge
 6. Se despliega y se registra en progress/history.md
 ```
@@ -115,7 +115,8 @@ git push origin feature/login-usuarios
 
 - **Nunca `git push --force`.** El squash & merge lo hace el coordinador, no tú.
 - Tú **no** apruebas PRs ni creas repositorios. Los tags de versión los crea el
-  agente al publicar, tras el merge de release `dev` → `main`.
+  workflow `tag-release.yml` tras el merge de release `dev` → `main` (el agente,
+  solo si el workflow no corrió).
 - Si te piden correcciones: push a la **misma** rama. Nunca abras un PR nuevo.
 
 El detalle completo (nombres de rama, tipos de commit, plantilla de PR, semver) está en

@@ -1,11 +1,11 @@
 # Visión general — CCEM/SDD y souclaude-harness
 
-> ⚠️ **Este documento predata el harness v2.0.0 y describe el modelo Planner.** A partir de
-> v2.0.0 (capa de rocas), **el emisor de IDs es el hito** (`<PREFIJO>-H<n>`), no Planner: la
-> roca nace en la reunión trimestral, se descompone en hitos, y el hito emite el ID que amarra
-> spec ↔ rama ↔ PR. Donde este texto diga "tarjeta de Planner", léase "hito". Fuentes vigentes:
-> `docs/decisions/20260722-capa-rocas-hito-emisor-de-ids.md`, la skill `ccem-planner` y el
-> paquete `ccem-rocas`. Este documento se reescribe en una tarjeta aparte.
+> ⚠️ **DOCUMENTO HISTÓRICO (harness 1.x).** Describe CCEM/SDD, la constitución P1-P10,
+> `AGENTS.md`, los agentes, Planner y las rocas: todo eso lo eliminó el harness 3.0 (figura
+> como obsoleto en `templates/harness.manifest.json`). **No es referencia operativa**, y sus
+> comandos, requisitos y enlaces pueden no existir ya. Lo vigente está en el
+> [README](../README.md), en [GUIA-DESARROLLADOR.md](GUIA-DESARROLLADOR.md) y en
+> [onboarding-desarrollador.md](onboarding-desarrollador.md).
 
 > Documento de referencia interno. Explica **con profundidad** qué es hoy la metodología
 > CCEM, cómo encaja el Spec-Driven Development (SDD) dentro de ella, y qué es y cómo

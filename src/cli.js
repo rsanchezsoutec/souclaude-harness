@@ -50,6 +50,9 @@ const OPTIONS = {
   // instalan o actualizan solos, tambien con --yes; en CI hace falta el flag.
   // --no-cli-global lo omite.
   'cli-global': { type: 'boolean' },
+  // Proteccion de `main` en GitHub (modo equipo). --no-github-protect la omite:
+  // para repos cuya proteccion ya administra la organizacion.
+  'github-protect': { type: 'boolean', default: true },
   'assume-version': { type: 'string' },
   // monitor. --interval y --top solo pueden ser 'string' en parseArgs (no hay tipo
   // numerico): el comando los convierte y valida.
@@ -226,6 +229,10 @@ ${pc.bold('FLAGS')}
                        terminal. Solo en CI hace falta este flag (sin el, se
                        avisa). --no-cli-global lo omite. Idempotente.
   --no-vault           Omite el paso del Vault por completo.
+  --no-github-protect  No configura la proteccion de main en GitHub. En modo
+                       equipo, init/upgrade la REESCRIBEN entera (0 aprobaciones,
+                       solo los checks del harness): usalo si la administra la
+                       organizacion o ya tiene reglas mas estrictas.
   --assume-version     (adopt) Version del harness que se asume instalada.
   --strict             (verify) Los warnings (huerfanos) tambien hacen fallar el comando.
 

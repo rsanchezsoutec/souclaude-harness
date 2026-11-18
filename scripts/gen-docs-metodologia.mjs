@@ -68,7 +68,7 @@ export function renderBloques(f) {
       `npx github:${f.slug}#${f.tagMayor}`,
       '```',
       '',
-      'Opcional, una vez por máquina, el CLI global (habilita `souclaude status`, `souclaude monitor` y `souclaude vault-sync` desde cualquier repo):',
+      'El CLI global (habilita `souclaude status`, `souclaude monitor` y `souclaude vault-sync` desde cualquier repo) lo instalan y actualizan solos `init` y `upgrade`. Para instalarlo a mano, una vez por máquina:',
       '',
       '```bash',
       `npm install -g github:${f.slug}#${f.tagMayor}`,

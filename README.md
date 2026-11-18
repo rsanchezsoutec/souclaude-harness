@@ -34,6 +34,13 @@ progress/                     progreso del proyecto y protocolo del Vault
     adr-new                   documentar decisiones con ADRs
     harness-upgrade           actualizar el harness desde Claude
     vault-milestones          análisis e iteración de milestones en el Vault
+    jira-sync · azdo-sync     espejo del tablero en Jira o Azure Boards (elige una)
+    soutec-github-solo        flujo Git del modo solo (en vez de soutec-github)
+.github/                      plantilla de PR, CODEOWNERS y workflows reglas-* y
+                              tag-release
+scripts/                      check-pr-rules, tag-release y release-publicar (los
+                              corren CI y el hook reglas-pr)
+.mcp.json                     conectores MCP de la skill de espejo que instales
 .gitignore                    bloque gestionado, tus líneas intactas
 ```
 
@@ -89,7 +96,8 @@ Sin comando, se autodetecta: hay lockfile → `upgrade` · hay estructura previa
 
 Flags que importan: `--dry-run` (imprime el plan, escribe cero bytes), `--yes`,
 `--force`, `--prune`, `--no-backup`, `--verbose`, `--solo`/`--equipo` (modo de
-trabajo del repo, ver arriba).
+trabajo del repo, ver arriba), `--no-github-protect` (no toca la protección de
+`main` en GitHub; por defecto, en modo equipo, `init`/`upgrade` la reescriben).
 
 ## `souclaude monitor`
 
@@ -127,7 +135,8 @@ monitor dentro de un repo con `project` declarado (fuera de un repo no hay a qu�
 proyecto atribuirla). Bonus: un repo nuevo con la config de máquina presente se
 autoconecta al Vault en el `init`, sin preguntas.
 
-Cuatro modos, excluyentes entre sí:
+Tres modos excluyentes (en vivo, `--once`, `--json`) y dos vistas que se combinan
+con ellos (`--compact`, `--agents`):
 
 - **En vivo** (default, con TTY): panel que se repinta solo, alternate buffer,
   reacciona a resize. `q` sale con el exit code del último snapshot, `p` pausa.
@@ -267,6 +276,22 @@ cerrado y no vaya a cambiar hasta el mes que viene.
   gastaron en otra máquina sin el monitor corriendo, esa parte queda perdida de forma
   permanente. Lo único que persiste es el snapshot en dólares que la propia API ya
   entregó.
+
+## Variables de entorno
+
+| Variable | Quién la lee | Para qué |
+|---|---|---|
+| `VAULT_PATH` | CLI y hooks | Ruta del Vault cuando el repo no tiene `.claude/vault.local.json`. |
+| `CI` | CLI | Con `true` o `1`: sin preguntas, sin instalar el CLI global, sin red en el monitor, y las confirmaciones escritas (`BORRAR`, `FORCE`) se deniegan. |
+| `NO_COLOR` / `FORCE_COLOR` | CLI | Apagan o fuerzan el color de la salida. |
+| `SOUCLAUDE_ASCII` | monitor | Con `1`, glifos ASCII (igual que `--ascii`). |
+| `SOUCLAUDE_LOCAL_ACCOUNTS` | monitor | Carpetas de configuración de otras cuentas de Claude en esta máquina, separadas como `PATH` (`;` en Windows, `:` en el resto), para verlas en el panel. |
+| `SOUCLAUDE_CLAUDE_HOME` | CLI y hooks | Reemplaza `~/.claude` como carpeta del estado de máquina (`souclaude/vault.json` y las cachés). Pensada para tests y fixtures. |
+| `SOUCLAUDE_HARNESS_REMOTO` | hooks de sesión | Remoto git del que se leen los tags de versión del harness. Por defecto, este repo. |
+| `SOUCLAUDE_GH_RELEASES` | hook `declarar-milestone` | Lista de tags separada por comas que reemplaza la consulta a `gh release view`. Solo para tests. |
+| `GITHUB_BASE_REF` / `GITHUB_HEAD_REF` | `check-pr-rules.mjs` | Las define GitHub Actions en un PR: base y rama del check. |
+| `CLAUDE_PROJECT_DIR` | hooks | La define Claude Code: raíz del proyecto. |
+| `ADO_MCP_AUTH_TOKEN` | conector de Azure DevOps | PAT para la skill `azdo-sync`. Nunca se commitea. |
 
 ## La garantía
 
