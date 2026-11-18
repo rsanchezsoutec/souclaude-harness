@@ -35,8 +35,8 @@
 // Las reglas en skip (no medibles en este contexto) se reportan pero no fallan.
 
 import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
-import { pathToFileURL } from 'node:url'
+import { readFileSync, realpathSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 
 // El prefijo opcional en mayusculas es el ID rastreable que la skill exige
@@ -497,7 +497,24 @@ function main() {
   process.exit(huboFalse ? 1 : 0)
 }
 
-// Solo como ejecutable: al importarse desde los tests no corre nada.
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Solo como ejecutable: al importarse desde los tests no corre nada. Se comparan
+// rutas REALES (Node resuelve los enlaces simbolicos del script de entrada): con
+// la comparacion directa de import.meta.url contra process.argv[1], invocar el
+// script por una ruta con un enlace (symlink, junction, /tmp en macOS) lo dejaba
+// sin hacer nada y con exit 0 -- un check "en verde" que nunca corrio.
+function esPuntoDeEntrada(urlDelModulo) {
+  if (!process.argv[1]) return false
+  const real = (ruta) => {
+    try {
+      return realpathSync.native(ruta)
+    } catch {
+      return ruta
+    }
+  }
+  const [modulo, entrada] = [real(fileURLToPath(urlDelModulo)), real(process.argv[1])]
+  return process.platform === 'win32' ? modulo.toLowerCase() === entrada.toLowerCase() : modulo === entrada
+}
+
+if (esPuntoDeEntrada(import.meta.url)) {
   main()
 }

@@ -33,9 +33,9 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { fileURLToPath } from 'node:url'
 
-const ENTORNO = { ...process.env, GIT_TERMINAL_PROMPT: '0', GH_PROMPT_DISABLED: '1' }
+const ENTORNO ={ ...process.env, GIT_TERMINAL_PROMPT: '0', GH_PROMPT_DISABLED: '1' }
 const MARCA = '<!-- souclaude:reglas-pr -->'
 const LIMITE_SALIDA = 60_000
 const MAX_AVISOS = 20
@@ -782,7 +782,26 @@ function main() {
   process.exit(0)
 }
 
-// Solo como ejecutable: al importarse desde los tests no corre nada.
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Este archivo es el script que se esta ejecutando (y no un import desde los
+// tests)? Se comparan rutas REALES: Node resuelve los enlaces simbolicos del
+// script de entrada, asi que import.meta.url y process.argv[1] difieren cuando
+// el proyecto se abre por una ruta con un enlace (un symlink o junction en el
+// camino, /tmp y /var en macOS). Comparados tal cual, el hook terminaba sin
+// hacer nada y con exit 0: la proteccion de main y el check de secretos
+// quedaban apagados en silencio.
+export function esPuntoDeEntrada(urlDelModulo, argv1 = process.argv[1], plataforma = process.platform) {
+  if (!argv1) return false
+  const real = (ruta) => {
+    try {
+      return fs.realpathSync.native(ruta)
+    } catch {
+      return path.resolve(ruta)
+    }
+  }
+  const [modulo, entrada] = [real(fileURLToPath(urlDelModulo)), real(argv1)]
+  return plataforma === 'win32' ? modulo.toLowerCase() === entrada.toLowerCase() : modulo === entrada
+}
+
+if (esPuntoDeEntrada(import.meta.url)) {
   main()
 }
