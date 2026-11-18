@@ -51,8 +51,10 @@ const GRUPOS = [
 // --- Lectura del comando ---------------------------------------------------
 
 // Parte un comando de shell por sus operadores de control (&&, ||, |, ;, &,
-// saltos de linea) sin cortar dentro de comillas: `git commit -m "x; git push"`
-// es un solo segmento. Las redirecciones (2>&1, &>) no son operadores.
+// saltos de linea) y por los parentesis de un subshell o de una sustitucion de
+// comando -- `(git push)`, `$(git push)` --, sin cortar dentro de comillas:
+// `git commit -m "x; git push"` es un solo segmento. Las redirecciones (2>&1,
+// &>) no son operadores.
 export function segmentos(comando, shell = 'bash') {
   const escape = shell === 'powershell' ? '`' : '\\'
   const salida = []
@@ -73,7 +75,7 @@ export function segmentos(comando, shell = 'bash') {
       actual += c + comando[++i]
     } else if (c === '&' && (/[<>]$/.test(actual) || comando[i + 1] === '>')) {
       actual += c
-    } else if (c === ';' || c === '\n' || c === '\r' || c === '&' || c === '|') {
+    } else if (c === ';' || c === '\n' || c === '\r' || c === '&' || c === '|' || c === '(' || c === ')') {
       if ((c === '&' || c === '|') && comando[i + 1] === c) i++
       salida.push(actual)
       actual = ''
@@ -132,14 +134,84 @@ export function palabras(segmento, shell = 'bash') {
     sinRedireccion.push(crudas[i])
   }
   let desde = 0
-  while (desde < sinRedireccion.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(sinRedireccion[desde])) desde++
+  while (desde < sinRedireccion.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(sinRedireccion[desde])) {
+    // VAR=`comando ...`: lo que sigue al = no es un valor, es un comando que se
+    // ejecuta. Se conserva (sin el nombre de la variable) como inicio del segmento.
+    const valor = sinRedireccion[desde].replace(/^[A-Za-z_][A-Za-z0-9_]*=/, '')
+    if (valor.startsWith('`')) {
+      sinRedireccion[desde] = valor
+      break
+    }
+    desde++
+  }
   return sinRedireccion.slice(desde)
 }
 
 const ES_GIT = /(^|[\\/])git(\.exe)?$/i
 const ES_GH = /(^|[\\/])gh(\.exe)?$/i
 const ES_CD = /^(cd|pushd|chdir|set-location|sl)$/i
+const ES_SHELL = /(^|[\\/])(ba|z|da|k|a)?sh(\.exe)?$/i
+const ES_POWERSHELL = /(^|[\\/])(powershell|pwsh)(\.exe)?$/i
+const ES_CMD = /(^|[\\/])cmd(\.exe)?$/i
+const ES_EVAL = /^(eval|iex|invoke-expression)$/i
 const OPCIONES_PUSH_CON_VALOR = new Set(['--repo', '-o', '--push-option', '--receive-pack', '--exec'])
+
+// Lo que puede ir DELANTE de un comando sin cambiar cual es. Los envoltorios son
+// los que el propio Claude Code quita antes de comparar con las reglas de
+// permisos (timeout, time, nice, nohup, stdbuf, command, builtin, noglob, xargs)
+// mas env, exec y sudo/doas: como `command git push origin main` casa con la
+// regla allow `Bash(git push:*)`, ese push pasaba sin pregunta Y sin que este
+// hook lo viera. Las palabras de control son las de un if/while/grupo de shell.
+const ENVOLTORIOS = new Set(['command', 'builtin', 'exec', 'time', 'nice', 'nohup', 'stdbuf', 'timeout', 'noglob', 'env', 'sudo', 'doas', 'xargs'])
+const PALABRAS_DE_CONTROL = new Set(['then', 'do', 'else', 'elif', 'if', 'while', 'until', '!', '{', '}'])
+const PROFUNDIDAD_MAXIMA = 4
+
+// El comando que un segmento ejecuta de verdad, sin lo que lo envuelve.
+// `viaXargs`: sus argumentos llegan por stdin y no se pueden leer del texto.
+export function comandoEfectivo(palabrasDelSegmento) {
+  let p = [...palabrasDelSegmento]
+  let viaXargs = false
+  // `git push` entre backticks, o {git push} pegado a las llaves (PowerShell).
+  const abre = p[0]?.match(/^[`{]+/)?.[0]
+  if (abre) {
+    p[0] = p[0].slice(abre.length)
+    p[p.length - 1] = p[p.length - 1].replace(/[`};]+$/, '')
+    p = p.filter(Boolean)
+  }
+  for (let vueltas = 0; vueltas < 12 && p.length; vueltas++) {
+    if (PALABRAS_DE_CONTROL.has(p[0])) {
+      p.shift()
+      continue
+    }
+    const nombre = p[0].replace(/^.*[\\/]/, '').replace(/\.exe$/i, '').toLowerCase()
+    if (!ENVOLTORIOS.has(nombre)) break
+    if (nombre === 'xargs') viaXargs = true
+    p.shift()
+    // Opciones del envoltorio, asignaciones de env y duraciones de timeout/nice.
+    while (p.length && (p[0].startsWith('-') || /^[A-Za-z_][A-Za-z0-9_]*=/.test(p[0]) || /^\d+(\.\d+)?[smhd]?$/.test(p[0]))) p.shift()
+  }
+  return { p, viaXargs }
+}
+
+// Un comando escrito dentro de otro: `bash -c "..."`, `eval "..."`,
+// `powershell -Command "..."`, `cmd /c ...`. Devuelve el texto a analizar.
+export function comandoAnidado(p, shell = 'bash') {
+  const primero = p[0] ?? ''
+  if (ES_EVAL.test(primero)) return p.length > 1 ? { comando: p.slice(1).join(' '), shell } : null
+  if (ES_SHELL.test(primero)) {
+    const i = p.findIndex((w, k) => k > 0 && /^-[a-zA-Z]*c$/.test(w))
+    return i !== -1 && p[i + 1] != null ? { comando: p[i + 1], shell: 'bash' } : null
+  }
+  if (ES_POWERSHELL.test(primero)) {
+    const i = p.findIndex((w, k) => k > 0 && /^-c(o(m(m(a(n(d)?)?)?)?)?)?$/i.test(w))
+    return i !== -1 && p[i + 1] != null ? { comando: p.slice(i + 1).join(' '), shell: 'powershell' } : null
+  }
+  if (ES_CMD.test(primero)) {
+    const i = p.findIndex((w, k) => k > 0 && /^\/[ck]$/i.test(w))
+    return i !== -1 && p[i + 1] != null ? { comando: p.slice(i + 1).join(' '), shell: 'bash' } : null
+  }
+  return null
+}
 
 // En Git Bash sobre Windows el agente escribe rutas MSYS (`/c/Users/...`), que
 // path.resolve leeria como relativas a la raiz de la unidad actual
@@ -158,32 +230,76 @@ function carpetaTrasCd(actual, destino) {
 
 // Cada `git push` del comando, con la carpeta efectiva en la que corre (el cwd
 // mas los cd y -C previos) y sus argumentos: sin `git`, sus opciones globales
-// ni `push`.
-function* pushes(comando, cwd, shell = 'bash') {
+// ni `push`. Mira a traves de envoltorios (`command git push`), agrupaciones
+// (`(git push)`, `if ...; then git push; fi`) y comandos anidados (`bash -c`,
+// `eval`). `incierto` lleva el motivo cuando el texto no alcanza para saber que
+// se sube (xargs, un alias de git definido en la misma linea).
+// `$(git branch --show-current)` y sus equivalentes SI se pueden leer del
+// texto: son la rama actual, lo mismo que HEAD. Es la forma habitual de pushear
+// "esta rama" en un script, y tratarla como incierta seria preguntar de mas.
+const NOMBRE_DE_LA_RAMA_ACTUAL = String.raw`git\s+(?:branch\s+--show-current|rev-parse\s+--abbrev-ref\s+HEAD|symbolic-ref\s+--short\s+HEAD)`
+const SUSTITUCION_DE_LA_RAMA_ACTUAL = new RegExp(String.raw`\$\(\s*${NOMBRE_DE_LA_RAMA_ACTUAL}\s*\)|` + '`\\s*' + NOMBRE_DE_LA_RAMA_ACTUAL + '\\s*`', 'g')
+
+function* pushes(comando, cwd, shell = 'bash', nivel = 0) {
   let carpeta = cwd
-  for (const segmento of segmentos(comando, shell)) {
-    const p = palabras(segmento, shell)
+  for (const segmento of segmentos(comando.replace(SUSTITUCION_DE_LA_RAMA_ACTUAL, 'HEAD'), shell)) {
+    const { p, viaXargs } = comandoEfectivo(palabras(segmento, shell))
     if (ES_CD.test(p[0] ?? '')) {
       carpeta = carpetaTrasCd(carpeta, p.slice(1).find((x) => !x.startsWith('-')))
+      continue
+    }
+    const anidado = nivel < PROFUNDIDAD_MAXIMA ? comandoAnidado(p, shell) : null
+    if (anidado) {
+      // Su `cd` no sale del comando anidado: la carpeta de afuera no cambia.
+      yield* pushes(anidado.comando, carpeta, anidado.shell, nivel + 1)
       continue
     }
     if (!ES_GIT.test(p[0] ?? '')) continue
 
     let i = 1
     let dir = carpeta
+    let alias = false
     while (i < p.length && p[i].startsWith('-')) {
       if (p[i] === '-C') {
         dir = path.resolve(dir, rutaNativa(p[i + 1] ?? '.'))
         i += 2
       } else if (['-c', '--git-dir', '--work-tree', '--namespace'].includes(p[i])) {
+        if (p[i] === '-c' && /^alias\./i.test(p[i + 1] ?? '')) alias = true
         i += 2
       } else {
         i += 1
       }
     }
-    if (p[i] !== 'push') continue
-    yield { dir, args: p.slice(i + 1) }
+    if (p[i] !== 'push') {
+      // `git -c alias.p=push p origin main`: el subcomando real no se ve.
+      if (alias) yield { dir, args: [], incierto: 'usa un alias de git definido en la misma linea' }
+      continue
+    }
+    yield { dir, args: p.slice(i + 1), incierto: viaXargs ? 'sus argumentos llegan por xargs' : null }
   }
+}
+
+// Variables, sustituciones de comando y comodines: lo que el shell resuelve
+// recien al ejecutar, y que este hook no puede leer del texto del comando.
+const DINAMICO = /[$`*?[]|%[A-Za-z_][A-Za-z0-9_]*%/
+
+// El flag o refspec que vuelve forzado a un push, o null. Cubre lo que las reglas
+// `ask` de settings.json no ven por ser de prefijo: el flag al final
+// (`git push origin x --force`), agrupado (`-uf`) o como `+refspec`.
+export function pushForzado(args) {
+  for (let j = 0; j < args.length; j++) {
+    const a = args[j]
+    if (OPCIONES_PUSH_CON_VALOR.has(a)) {
+      j++
+    } else if (/^--force(-with-lease|-if-includes)?(=|$)/.test(a)) {
+      return a
+    } else if (/^-[a-zA-Z0-9]*f[a-zA-Z0-9]*$/.test(a)) {
+      return a
+    } else if (a.startsWith('+')) {
+      return a
+    }
+  }
+  return null
 }
 
 // Lo que el primer `git push` del comando subiria, o null si no sube commits:
@@ -241,7 +357,7 @@ const ramaCorta = (ref) => ref.replace(/^refs\/heads\//, '')
 // origin), que sirve para reconocer el Vault por su URL.
 export function destinosDelPush(comando, cwd, shell = 'bash') {
   const salida = []
-  for (const { dir, args } of pushes(comando, cwd, shell)) {
+  for (const { dir, args, incierto: inciertoDelComando = null } of pushes(comando, cwd, shell)) {
     const posicionales = []
     const destinos = []
     let soloTags = false
@@ -261,8 +377,16 @@ export function destinosDelPush(comando, cwd, shell = 'bash') {
       const ref = destino ?? origen
       destinos.push(ref === 'HEAD' || ref === '@' ? RAMA_ACTUAL : ramaCorta(ref))
     }
-    if (refspecs.length === 0 && destinos.length === 0 && !soloTags) destinos.push(RAMA_ACTUAL, UPSTREAM)
-    if (destinos.length) salida.push({ dir, remoto: posicionales[0] ?? null, destinos: [...new Set(destinos)] })
+    // Lo que el shell resuelve recien al ejecutar (`$RAMA`, `$(...)`, un comodin
+    // en el refspec) no se puede leer del texto: viaja como `incierto`, con el
+    // motivo, para que prePushMain pregunte en vez de dejarlo pasar en silencio.
+    const dinamico = posicionales.find((w) => DINAMICO.test(w))
+    const incierto = inciertoDelComando ?? (dinamico ? `"${dinamico}" se resuelve recien al ejecutar` : null)
+    const forzado = pushForzado(args)
+    if (refspecs.length === 0 && destinos.length === 0 && !soloTags && !incierto) destinos.push(RAMA_ACTUAL, UPSTREAM)
+    if (destinos.length || incierto || forzado) {
+      salida.push({ dir, remoto: posicionales[0] ?? null, destinos: [...new Set(destinos)], incierto, forzado })
+    }
   }
   return salida
 }
@@ -274,7 +398,7 @@ const FLAGS_DE_METADATA = /^(--body|-b|--body-file|-F|--base|-B)(=|$)/
 export function cambioDePR(comando, cwd, shell = 'bash') {
   let carpeta = cwd
   for (const segmento of segmentos(comando, shell)) {
-    const p = palabras(segmento, shell)
+    const { p } = comandoEfectivo(palabras(segmento, shell))
     if (ES_CD.test(p[0] ?? '')) {
       carpeta = carpetaTrasCd(carpeta, p.slice(1).find((x) => !x.startsWith('-')))
       continue
@@ -487,11 +611,27 @@ function esElVault({ push, raiz, correr, vault }) {
   return REPO_DEL_VAULT.test(canon) || vault.repos.some((r) => repoCanonico(r) === canon)
 }
 
+// Decision `ask` del PreToolUse: el hook no puede afirmar que el comando viola
+// una regla, pero tampoco que no. Decide el usuario, con el motivo a la vista.
+function preguntar(lineas) {
+  return {
+    hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask', permissionDecisionReason: lineas.join('\n') },
+  }
+}
+
 export function prePushMain({ push, correr, vault, enSolo = enModoSolo }) {
   const raiz = raizDelRepo(push.dir, correr)
   if (raiz && enSolo(raiz)) return null
-  if (!ramasDestino(push, correr).has(RAMA_PROTEGIDA)) return null
+  const tocaMain = ramasDestino(push, correr).has(RAMA_PROTEGIDA)
+  if (!tocaMain && !push.incierto) return null
   if (esElVault({ push, raiz, correr, vault })) return null
+  if (!tocaMain) {
+    return preguntar([
+      `reglas-pr (SHS-M42): no se puede saber a que rama sube este push en ${raiz ?? push.dir}: ${push.incierto}.`,
+      `\`${RAMA_PROTEGIDA}\` del proyecto solo recibe merges desde \`dev\` por PR. Confirma con el usuario que este push no la toca,`,
+      'o vuelve a escribirlo con el remoto y la rama literales (`git push origin <rama>`) para que no haga falta preguntar.',
+    ])
+  }
   const sobreElVault = vault.rutas.length
     ? `El Vault de esta maquina esta en ${vault.rutas[0]} y este push no apunta ahi. En el Vault el push directo a main es el protocolo y este hook lo deja pasar.`
     : 'No hay Vault configurado en esta maquina (.claude/vault.local.json, VAULT_PATH o ~/.claude/souclaude/vault.json); un clon del Vault se reconoce igual por su remoto (soubunker-vault) o por su carpeta 00-System. Si este push era al Vault y no se reconocio, configuralo: `souclaude upgrade --vault-path <ruta>`.'
@@ -507,6 +647,20 @@ export function prePushMain({ push, correr, vault, enSolo = enModoSolo }) {
       ].join('\n'),
     },
   }
+}
+
+// Un push forzado reescribe historia que otros ya tienen. En modo equipo el
+// protocolo lo prohibe (solo --force-with-lease, y solo sobre una rama propia):
+// se pregunta siempre, en el proyecto y en el Vault. En modo solo no hay gates.
+export function prePushForzado({ push, correr, enSolo = enModoSolo }) {
+  if (!push.forzado) return null
+  const raiz = raizDelRepo(push.dir, correr)
+  if (raiz && enSolo(raiz)) return null
+  return preguntar([
+    `reglas-pr: push forzado (\`${push.forzado}\`) en ${raiz ?? push.dir}.`,
+    'El protocolo es "nunca `git push --force`": solo `--force-with-lease`, solo sobre una rama propia y nunca sobre `dev` ni `main`.',
+    'Confirma con el usuario antes de seguir; si era para sincronizar la rama, usa `git fetch origin && git merge origin/dev`.',
+  ])
 }
 
 export function prePush({ push, raiz, correr }) {
@@ -720,17 +874,25 @@ export function procesar(entrada, correr = correrReal) {
 
   if (entrada.hook_event_name === 'PreToolUse') {
     // Primero main: es la regla dura y no necesita el script. Despues secretos.
+    const esDeny = (r) => r?.hookSpecificOutput?.permissionDecision === 'deny'
     const vault = configDelVault()
+    // Un deny corta; una pregunta (`ask`) queda pendiente por si mas abajo hay
+    // un deny, que siempre gana.
+    let pregunta = null
     for (const push of destinosDelPush(comando, cwd, shell)) {
-      const negado = prePushMain({ push, correr, vault })
-      if (negado) return negado
+      const decision = prePushMain({ push, correr, vault }) ?? prePushForzado({ push, correr })
+      if (esDeny(decision)) return decision
+      pregunta ??= decision
     }
     const push = pushDelComando(comando, cwd, shell)
     const raiz = push && repoConReglas(push.dir, correr, { tambienEnSolo: true })
-    if (!raiz) return null
+    if (!raiz) return pregunta
     // Secretos primero; con eso en orden, la frescura de docs/metodologia
-    // (solo en el repo del generador, SHS-M16).
-    return prePush({ push, raiz, correr }) ?? preDocsMetodologia(correr, { raizPush: raiz })
+    // (solo en el repo del generador, SHS-M16). Un aviso de "no se pudo validar"
+    // viaja junto con la pregunta, si la hay.
+    const validacion = prePush({ push, raiz, correr }) ?? preDocsMetodologia(correr, { raizPush: raiz })
+    if (esDeny(validacion) || !pregunta) return validacion
+    return validacion?.systemMessage ? { ...pregunta, systemMessage: validacion.systemMessage } : pregunta
   }
   if (entrada.hook_event_name === 'PostToolUse') {
     const cambio = cambioDePR(comando, cwd, shell)
