@@ -271,6 +271,23 @@ test('hook real: el push forzado se pregunta en modo equipo, este donde este el 
   assert.equal(decision(dir, 'git push origin main --force')?.tipo, 'deny')
 })
 
+test('hook real: borrar `dev` en el remoto se pregunta; borrar una rama de trabajo, no', () => {
+  const dir = proyecto()
+  for (const comando of ['git push origin --delete dev', 'git push origin -d dev', 'git push origin :dev', 'command git push origin :dev', 'git push origin --delete fix/M1-vieja dev']) {
+    const d = decision(dir, comando)
+    assert.equal(d?.tipo, 'ask', comando)
+    assert.match(d.motivo, /BORRA la rama `dev`/, comando)
+  }
+  for (const comando of ['git push origin --delete fix/M1-vieja', 'git push origin :fix/M1-vieja', 'git push origin dev', 'git push --dry-run origin fix/M1-algo']) {
+    assert.equal(decision(dir, comando), null, comando)
+  }
+  // Borrar main ya es tocar main: se deniega.
+  assert.equal(decision(dir, 'git push origin --delete main')?.tipo, 'deny')
+  assert.equal(decision(dir, 'git push origin :main')?.tipo, 'deny')
+  // En modo solo no hay gates.
+  assert.equal(decision(proyecto({ modo: 'solo' }), 'git push origin --delete dev'), null)
+})
+
 test('hook real: el trabajo normal no se toca (ni deny ni pregunta)', () => {
   const dir = proyecto()
   for (const comando of [

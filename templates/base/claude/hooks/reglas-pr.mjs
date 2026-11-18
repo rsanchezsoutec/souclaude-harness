@@ -394,10 +394,14 @@ export function destinosDelPush(comando, cwd, shell = 'bash') {
       }
     }
     const refspecs = posicionales.slice(1)
+    // Ramas remotas que este push BORRA: `--delete rama` / `-d rama` y `:rama`.
+    const borraTodo = args.some((a) => a === '--delete' || /^-[a-zA-Z]*d[a-zA-Z]*$/.test(a))
+    const borra = []
     for (const refspec of refspecs) {
       const [origen, destino] = refspec.replace(/^\+/, '').split(':')
       const ref = destino ?? origen
       destinos.push(ref === 'HEAD' || ref === '@' ? RAMA_ACTUAL : ramaCorta(ref))
+      if (borraTodo || refspec.startsWith(':')) borra.push(ramaCorta(ref))
     }
     // Lo que el shell resuelve recien al ejecutar (`$RAMA`, `$(...)`, un comodin
     // en el refspec) no se puede leer del texto: viaja como `incierto`, con el
@@ -407,7 +411,7 @@ export function destinosDelPush(comando, cwd, shell = 'bash') {
     const forzado = pushForzado(args)
     if (refspecs.length === 0 && destinos.length === 0 && !soloTags && !incierto) destinos.push(RAMA_ACTUAL, UPSTREAM)
     if (destinos.length || incierto || forzado) {
-      salida.push({ dir, remoto: posicionales[0] ?? null, destinos: [...new Set(destinos)], incierto, forzado })
+      salida.push({ dir, remoto: posicionales[0] ?? null, destinos: [...new Set(destinos)], incierto, forzado, borra: [...new Set(borra)] })
     }
   }
   return salida
@@ -685,6 +689,25 @@ export function prePushForzado({ push, correr, enSolo = enModoSolo }) {
   ])
 }
 
+// `dev` es la rama de integracion: todas las ramas de trabajo nacen de ella y
+// todos los PR apuntan a ella. Borrarla en el remoto (`git push origin --delete
+// dev`, `git push origin :dev`) casa con la regla allow de `git push` y no la
+// frenaba nada. No es un deny -- puede ser a proposito --, pero se pregunta.
+// (`main` no llega aca: borrarla ya es "tocar main" y se deniega arriba.)
+const RAMA_DE_INTEGRACION = 'dev'
+
+export function prePushBorrado({ push, correr, vault, enSolo = enModoSolo }) {
+  if (!push.borra?.includes(RAMA_DE_INTEGRACION)) return null
+  const raiz = raizDelRepo(push.dir, correr)
+  if (raiz && enSolo(raiz)) return null
+  if (esElVault({ push, raiz, correr, vault })) return null
+  return preguntar([
+    `reglas-pr: este push BORRA la rama \`${RAMA_DE_INTEGRACION}\` del remoto en ${raiz ?? push.dir}.`,
+    `\`${RAMA_DE_INTEGRACION}\` es la rama de integracion: de ella nacen las ramas de trabajo y a ella apuntan los PR.`,
+    'Confirma con el usuario antes de seguir; para borrar una rama de trabajo ya mergeada, nombra esa rama.',
+  ])
+}
+
 export function prePush({ push, raiz, correr }) {
   for (const cabeza of push.cabezas) {
     const args = [SCRIPT_CONFIABLE, '--grupo', 'secretos', '--sin-pushear']
@@ -902,7 +925,7 @@ export function procesar(entrada, correr = correrReal) {
     // un deny, que siempre gana.
     let pregunta = null
     for (const push of destinosDelPush(comando, cwd, shell)) {
-      const decision = prePushMain({ push, correr, vault }) ?? prePushForzado({ push, correr })
+      const decision = prePushMain({ push, correr, vault }) ?? prePushForzado({ push, correr }) ?? prePushBorrado({ push, correr, vault })
       if (esDeny(decision)) return decision
       pregunta ??= decision
     }
