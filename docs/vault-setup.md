@@ -9,7 +9,7 @@
 
 | Opción | Cuándo | Trade-off |
 |---|---|---|
-| **Repo git** (recomendado) | Varias personas y agentes escribiendo | Historial, PRs para lo estratégico, sin conflictos silenciosos. Es lo que asume la §7 de la guía. |
+| **Repo git** (recomendado) | Varias personas y agentes escribiendo | Historial y sin conflictos silenciosos; lo estratégico se cuida por convención (§4), no por PR. Es lo que asume la §7 de la guía. |
 | Carpeta sincronizada (OneDrive/SharePoint) | Una sola persona, arranque rápido | Sin historial ni PRs; convención manual para evitar pisar archivos. Migrable a git después. |
 
 Este runbook cubre el camino **repo git**. Si arrancas con carpeta, salta la §1 y usa la
@@ -121,8 +121,9 @@ kanban-plugin: board
 EOF
 ```
 
-Repite por cada prefijo de `id-registry.md`. Los `roca_*.yaml` **no** se crean a mano:
-nacen en la próxima `/rock-plan`.
+Repite por cada prefijo de `id-registry.md`. Los `roca_*.yaml` no los crea ni los escribe
+el harness: los comandos `/rock-*` se eliminaron en la 3.0.0, y si el equipo mantiene la
+capa de rocas la opera una persona (ver `vault-guide.md`).
 
 ## 3. Conectar con Obsidian
 
@@ -139,8 +140,9 @@ carpeta `Vault/` que acabas de clonar. No hay import ni sync propietario.
    activo se renderiza como tablero; sin él, se ve como Markdown plano (las columnas son
    `## Backlog`, `## En curso`, `## En review`, `## Hecho`).
 4. **Opcional — Git dentro de Obsidian**: plugin **Obsidian Git** para hacer
-   pull/commit/push sin salir de la app. Útil para los dueños de roca que no viven en la
-   terminal. La regla de `main` protegido sigue aplicando: lo estratégico va por PR.
+   pull/commit/push sin salir de la app. Útil para quien no vive en la terminal. El `main`
+   del Vault se escribe por push directo, sin PR ni protección de rama (§4): antes de
+   escribir, `git pull --rebase`.
 
 **Importante**: Obsidian y git son capas independientes sobre la misma carpeta. Obsidian
 edita archivos; git los versiona. No hay conflicto entre ambos mientras respetes la

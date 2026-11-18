@@ -355,7 +355,7 @@ proyecto, lo que dejaría al motor de migración sin nada que migrar.)
 | `souclaude adopt` | Para una estructura hecha a mano. **No toca ningún archivo**: solo escribe el lockfile. |
 
 Sin comando, **autodetecta**: hay lockfile → `upgrade`; hay estructura previa (`CLAUDE.md`,
-`.claude`, …) → `adopt`; repo limpio → `init` ([src/cli.js](src/cli.js)). Flags que
+`.claude`, …) → `adopt`; repo limpio → `init` ([src/cli.js](../src/cli.js)). Flags que
 importan: `--dry-run` (imprime el plan, escribe cero bytes), `--yes`, `--force`, `--prune`,
 `--no-backup`, `--verbose`, y `--name/--type/--stack/--lang` para responder sin modo
 interactivo.
@@ -364,7 +364,7 @@ interactivo.
 
 Es la propiedad más importante del motor, y la razón de que **init, adopción de legacy y
 migración de versión sean el mismo code path**. No hay tres flujos: hay una tabla de
-veredictos ([src/core/plan.js](src/core/plan.js)). El motor clasifica cada archivo cruzando
+veredictos ([src/core/plan.js](../src/core/plan.js)). El motor clasifica cada archivo cruzando
 tres cosas: qué hay en disco, qué dice el **lockfile** (`.claude/harness.json`) que había, y
 qué querría emitir el harness hoy.
 
@@ -389,7 +389,7 @@ valor tuyo — política `merge-json`).
 ### 4.3 Anatomía del motor
 
 `souclaude-harness` es en sí mismo un proyecto Node hexagonal-simple. Piezas clave en
-[src/core/](src/core/):
+[src/core/](../src/core/):
 
 - **`plan.js`** — calcula el plan de acciones (la tabla de veredictos de arriba). Corazón
   del motor.
@@ -463,15 +463,15 @@ completo está en el repo y sirve de ejemplo canónico:
 
 - **Tarjeta:** `PLN-001` (transversal).
 - **Rama:** `feature/PLN-001-orquestacion-agentes`.
-- **Spec:** [specs/PLN-001-orquestacion-agentes/spec.md](specs/PLN-001-orquestacion-agentes/spec.md)
+- **Spec:** [specs/PLN-001-orquestacion-agentes/spec.md](../specs/PLN-001-orquestacion-agentes/spec.md)
   — QUÉ y POR QUÉ, sin stack; goals priorizados, non-goals explícitos (no motor automático,
   no `feature_list.json`, no cambiar P1-P10), user journeys, success criteria medibles.
 - **Plan y Tasks:** `plan.md` y
-  [tasks.md](specs/PLN-001-orquestacion-agentes/tasks.md) — 12 tasks (T1-T12) de 15-30 min,
+  [tasks.md](../specs/PLN-001-orquestacion-agentes/tasks.md) — 12 tasks (T1-T12) de 15-30 min,
   un commit por task, con dependencias, verificación y checkpoints humanos. T1 = ADR; T2-T6
   = los 4 agentes + `AGENTS.md`; T7-T9 = manifest + versión + tests; T10-T11 = dogfooding
   (aplicar el harness a este repo); T12 = `/constitution-check` + cierre.
-- **ADR:** [docs/decisions/20260721-orquestacion-multiagente.md](docs/decisions/20260721-orquestacion-multiagente.md)
+- **ADR:** [docs/decisions/20260721-orquestacion-multiagente.md](decisions/20260721-orquestacion-multiagente.md)
   — decisión, alternativas descartadas, grilla `ccem-research`.
 - **Resultado:** spec en status `implemented`, harness bumpeado a `1.1.0`, PR mergeado
   (commit `fa7789a`).

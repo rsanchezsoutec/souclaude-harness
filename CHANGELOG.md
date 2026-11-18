@@ -127,6 +127,8 @@ versión, ajustar a él el `to` de las dos migraciones nuevas y regenerar
   `vX.Y.Z` ya existe en otro commit que el que se publica, `tag-release.mjs` lo
   avisa en su salida y, dentro de Actions, como anotación del workflow. Sigue
   saliendo 0: un release puede no requerir versión.
+- La guía `docs/vault-setup.md` todavía decía que lo estratégico del Vault iba por
+  PR y nombraba el comando `/rock-plan`, eliminado en la 3.0.0.
 
 ### Agregado
 
