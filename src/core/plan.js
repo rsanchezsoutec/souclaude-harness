@@ -4,7 +4,7 @@ import { leerParaElPlan, esDestSeguro } from './fsx.js'
 import { readTemplate, readTemplateBytes, readFragments } from './manifest.js'
 import { render } from './render.js'
 import { buildBlock, upsertBlock, extractBlock } from './block.js'
-import { seedMerge, parseJson, stringifyJson } from './jsonmerge.js'
+import { seedMerge, retirarSemilla, parseJson, stringifyJson } from './jsonmerge.js'
 import { migrationsFor } from '../migrations/index.js'
 
 // Veredictos. init, adopcion de un repo legacy y migracion de version son EL
@@ -37,6 +37,10 @@ export function computePlan({ manifest, cwd, lock, vars, detected, force = false
   // lockfile; sin nada, equipo — el harness completo, como siempre fue (los
   // call sites viejos y los tests que no pasan modo conservan su comportamiento).
   const modoActivo = modo ?? lock?.modo ?? 'equipo'
+  // Cambio de modo: el repo ya tenia el harness en otro modo (un lockfile sin
+  // modo es anterior al modo solo: era equipo). Lo usan los entries merge-json
+  // para retirar lo que sembro el modo anterior.
+  const modoAnterior = lock && (lock.modo ?? 'equipo') !== modoActivo ? (lock.modo ?? 'equipo') : null
 
   // Seleccion de skills. Sin parametro explicito: lo que dice el lockfile; sin
   // lockfile, todas las del catalogo del modo (compatibilidad con repos pre-3.0
@@ -95,7 +99,17 @@ export function computePlan({ manifest, cwd, lock, vars, detected, force = false
     if (group && group.length > 1 && group[0] !== entry) continue
     seenDests.add(entry.dest)
     const seedEntries = group && group.length > 1 ? group : null
-    actions.push(...[planFile({ entry, manifest, cwd, lock, vars, detected, fromVersion, force, seedEntries })].flat())
+    // Los entries del MISMO dest que pertenecian al modo anterior y no al actual
+    // (settings.json de equipo cuando se pasa a solo, y viceversa).
+    const retiredEntries =
+      modoAnterior && entry.policy === 'merge-json'
+        ? manifest.files.filter(
+            (e) => e.policy === 'merge-json' && e.dest === entry.dest && e.modos?.includes(modoAnterior) && !e.modos.includes(modoActivo)
+          )
+        : []
+    actions.push(
+      ...[planFile({ entry, manifest, cwd, lock, vars, detected, fromVersion, force, seedEntries, retiredEntries, modoAnterior, modoActivo })].flat()
+    )
   }
 
   // Archivos que emitimos en una version anterior y que este manifest ya no
@@ -161,7 +175,7 @@ export function resolveSkillSet({ manifest, lock, skills, modo = 'equipo' }) {
   return new Set([...required, ...chosen])
 }
 
-function planFile({ entry, manifest, cwd, lock, vars, detected, fromVersion, force, seedEntries }) {
+function planFile({ entry, manifest, cwd, lock, vars, detected, fromVersion, force, seedEntries, retiredEntries = [], modoAnterior = null, modoActivo = null }) {
   const abs = path.join(cwd, ...entry.dest.split('/'))
   if (entry.binary) return planBinaryFile({ entry, abs, lock, force })
   const raw = leerParaElPlan(abs, entry.dest)
@@ -190,7 +204,8 @@ function planFile({ entry, manifest, cwd, lock, vars, detected, fromVersion, for
 
   // 2. Contenido deseado. Para append-block y merge-json depende de lo que ya
   //    hay en disco, porque solo somos duenos de una parte del archivo.
-  const desired = desiredContent({ entry, manifest, vars, detected, baseline, seedEntries })
+  const cambioDeModo = retiredEntries.length ? { retiredEntries, modoAnterior, modoActivo, reasons } : null
+  const desired = desiredContent({ entry, manifest, vars, detected, baseline, seedEntries, cambioDeModo })
 
   const action = { dest: entry.dest, policy: entry.policy, reasons, content: desired, writePath: entry.dest }
 
@@ -208,8 +223,9 @@ function planFile({ entry, manifest, cwd, lock, vars, detected, fromVersion, for
     return action
   }
 
-  // append-block y merge-json son aditivos por construccion: solo tocan la region
-  // que el harness posee, asi que nunca pueden "pisar" al usuario. No hay conflicto
+  // append-block y merge-json solo tocan la region que el harness posee, asi que
+  // nunca pueden "pisar" al usuario: agregan lo que falta y, en un cambio de modo,
+  // retiran lo que el propio harness sembro para el modo anterior. No hay conflicto
   // posible; si el contenido difiere, es que hay que actualizar nuestra region.
   if (entry.policy === 'append-block' || entry.policy === 'merge-json') {
     action.verdict = UPDATE
@@ -317,7 +333,7 @@ function planBinaryFile({ entry, abs, lock, force }) {
   return action
 }
 
-function desiredContent({ entry, manifest, vars, detected, baseline, seedEntries }) {
+function desiredContent({ entry, manifest, vars, detected, baseline, seedEntries, cambioDeModo = null }) {
   switch (entry.policy) {
     case 'append-block': {
       const lines = readFragments(entry.src, detected.stacks)
@@ -327,9 +343,18 @@ function desiredContent({ entry, manifest, vars, detected, baseline, seedEntries
     case 'merge-json': {
       // Varios dueños (skills distintas) pueden aportar seed al mismo dest: se
       // funden en orden antes de fundirlos con lo que ya hay en disco.
-      const seeds = (seedEntries ?? [entry]).map((e) => JSON.parse(render(readTemplate(e.src), vars)))
-      const seed = seeds.reduce((acc, s) => seedMerge(acc, s), {})
-      const existing = parseJson(baseline, entry.dest)
+      const semillaDe = (entries) => entries.map((e) => JSON.parse(render(readTemplate(e.src), vars))).reduce((acc, s) => seedMerge(acc, s), {})
+      const seed = semillaDe(seedEntries ?? [entry])
+      let existing = parseJson(baseline, entry.dest)
+      if (cambioDeModo && existing != null) {
+        const sinLoAnterior = retirarSemilla(existing, semillaDe(cambioDeModo.retiredEntries), seed)
+        if (stringifyJson(sinLoAnterior) !== stringifyJson(existing)) {
+          cambioDeModo.reasons.push(
+            `cambio de modo ${cambioDeModo.modoAnterior} -> ${cambioDeModo.modoActivo}: se retiran los permisos y hooks que sembro el modo ${cambioDeModo.modoAnterior}; lo que agregaste o cambiaste queda`
+          )
+        }
+        existing = sinLoAnterior
+      }
       return stringifyJson(seedMerge(existing, seed))
     }
     default: {

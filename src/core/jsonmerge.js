@@ -5,7 +5,8 @@
 // asi trabaja, un upgrade no tiene derecho a devolverselo a "opusplan" (P8).
 // Para remover o renombrar claves (ej: las 4 claves invalidas del Kit v0) existen
 // las migraciones en src/migrations/ — eso es un acto explicito y versionado,
-// no un efecto secundario silencioso del merge.
+// no un efecto secundario silencioso del merge. El otro acto explicito es el
+// cambio de modo (`upgrade --solo` / `--equipo`): ver retirarSemilla, abajo.
 export function seedMerge(existing, seed) {
   if (!isPlainObject(existing)) return structuredClone(seed)
   const out = structuredClone(existing)
@@ -22,6 +23,38 @@ export function seedMerge(existing, seed) {
       }
     }
     // Escalar ya presente -> se respeta el del usuario.
+  }
+  return out
+}
+
+// Inversa acotada de seedMerge, para el CAMBIO DE MODO. El ADR del modo solo
+// (20260915) dice que la superficie solo deja settings.json permisivo y reemplaza
+// el hook de sesion; como el merge solo agrega, tras `upgrade --solo` quedaban el
+// deny de `gh pr merge` (que le gana al allow nuevo), los ask del push forzado,
+// el PostToolUse de los checks de PR y el SessionStart de declarar-milestone --
+// apuntando a un archivo que --prune acababa de borrar.
+//
+// De los ARRAYS del archivo quita los elementos que sembro `anterior` y que
+// `nuevo` ya no trae, reconocidos igual que en el merge (un grupo de hooks, por a
+// que tool aplica y que ejecuta). No toca escalares ni claves, ni nada que el
+// usuario haya agregado o reescrito: eso no coincide con el seed y se queda.
+export function retirarSemilla(existing, anterior, nuevo) {
+  if (!isPlainObject(existing) || !isPlainObject(anterior)) return existing
+  const out = structuredClone(existing)
+  for (const [key, valorAnterior] of Object.entries(anterior)) {
+    if (!(key in out)) continue
+    const valorNuevo = isPlainObject(nuevo) ? nuevo[key] : undefined
+    if (isPlainObject(out[key]) && isPlainObject(valorAnterior)) {
+      out[key] = retirarSemilla(out[key], valorAnterior, valorNuevo)
+    } else if (Array.isArray(out[key]) && Array.isArray(valorAnterior)) {
+      const siguen = new Set((Array.isArray(valorNuevo) ? valorNuevo : []).map(claveDeElemento))
+      const seRetiran = new Set(valorAnterior.map(claveDeElemento).filter((clave) => !siguen.has(clave)))
+      const antes = out[key].length
+      out[key] = out[key].filter((v) => !seRetiran.has(claveDeElemento(v)))
+      // Un array que quedo vacio por el retiro y que el modo nuevo no declara no
+      // deja la clave colgando (`"ask": []`, `"PostToolUse": []`).
+      if (out[key].length === 0 && antes > 0 && !Array.isArray(valorNuevo)) delete out[key]
+    }
   }
   return out
 }

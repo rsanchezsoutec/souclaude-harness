@@ -76,8 +76,11 @@ El harness instala una de dos superficies:
 `.claude/harness.json` y los upgrades lo respetan. Una instalación existente
 (lockfile sin modo) lo elige en su **primer `upgrade`** — en no interactivo el
 default es `equipo`, para no cambiar automatizaciones. Cambiar de modo después:
-`npx souclaude upgrade --solo` (o `--equipo`); los archivos del modo anterior
-quedan marcados obsoletos y `--prune` ofrece borrarlos.
+`npx github:soutecdev/souclaude-harness#v3 upgrade --solo` (o `--equipo`); los archivos del modo anterior
+quedan marcados obsoletos y `--prune` ofrece borrarlos. De `.claude/settings.json` se
+retiran los permisos y hooks que sembró el modo anterior —solo los que siguen como el
+harness los escribió; lo que agregaste o cambiaste queda—, así que el resultado es el
+de una instalación de cero en el modo nuevo.
 
 ## Comandos
 
@@ -323,7 +326,8 @@ repo, diga lo que diga el lockfile.
 Para los dos archivos que el harness no posee del todo:
 - `.gitignore` — solo es dueño de un bloque delimitado. Tus líneas nunca se tocan.
 - `.claude/settings.json` — solo **agrega** claves que faltan. Nunca pisa un valor que
-  tú escribiste.
+  tú escribiste. La única vez que retira algo es al cambiar de modo, y solo lo que el
+  propio harness había sembrado para el modo anterior.
 
 ## Desarrollo
 

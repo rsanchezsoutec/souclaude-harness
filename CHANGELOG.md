@@ -129,7 +129,14 @@ versión, ajustar a él el `to` de las dos migraciones nuevas y regenerar
   saliendo 0: un release puede no requerir versión.
 - La guía `docs/vault-setup.md` todavía decía que lo estratégico del Vault iba por
   PR y nombraba el comando `/rock-plan`, eliminado en la 3.0.0.
-
+- **Cambiar de modo deja `settings.json` como el modo nuevo lo necesita.** El merge
+  solo agrega, así que tras `upgrade --solo` quedaban el `deny` de `gh pr merge` (que
+  le gana al `allow` del modo solo: no se podía mergear), los `ask` del push forzado,
+  los checks de PR y el hook `declarar-milestone`, apuntando a un archivo que
+  `--prune` acababa de borrar. Ahora el cambio de modo retira lo que sembró el modo
+  anterior —solo lo que sigue idéntico; lo que agregaste o reescribiste queda— y el
+  resultado es el de una instalación de cero en ese modo, como describe el ADR
+  20260915. Vale también para un lockfile anterior al modo solo que elige `solo`.
 ### Agregado
 
 - `souclaude verify` valida el contrato del manifest entry por entry (policy,

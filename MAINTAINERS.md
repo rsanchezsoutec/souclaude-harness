@@ -191,7 +191,7 @@ evita que `autocrlf` de git y los editores de Windows marquen todo como "modific
 | `managed` | El harness manda. Se sobrescribe solo si el hash en disco coincide con el lockfile. |
 | `user-owned` | Pensado para que el usuario lo edite. Intacto, se actualiza; una vez editado **nunca se pisa**: si el template cambió, se escribe `.new`. |
 | `append-block` | El harness es dueño de un bloque delimitado dentro del archivo (`.gitignore`). Tus líneas no se tocan. |
-| `merge-json` | Solo **agrega** claves que faltan (`settings.json`). Nunca pisa un valor que escribiste. |
+| `merge-json` | Solo **agrega** claves que faltan (`settings.json`). Nunca pisa un valor que escribiste. Al cambiar de modo retira lo que el harness sembró para el modo anterior (`retirarSemilla`). |
 
 ### La clasificación (`src/core/plan.js`)
 
