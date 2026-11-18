@@ -243,6 +243,7 @@ Comparando disco × lockfile × template, cada archivo recibe un veredicto:
 ```bash
 npm test
 node --test "test/migrate.test.js"     # un archivo
+npm run test:cobertura                  # cobertura del código del repo; falla bajo el piso (Node >= 22.8)
 UPDATE_GOLDEN=1 npm test                # regenerar golden files (si los agregas)
 ```
 

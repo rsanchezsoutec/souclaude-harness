@@ -140,6 +140,15 @@ versión, ajustar a él el `to` de las dos migraciones nuevas y regenerar
   GitHub. Sin él, en modo equipo la reescriben entera en cada corrida.
 - Pruebas de la skill `soutec-md-a-pdf` (`test/python/`, solo biblioteca estándar)
   enganchadas a la suite, y tabla de variables de entorno en el README.
+- **Piso de cobertura**: `npm run test:cobertura` mide solo el código del repo
+  (sin `test/`) y falla por debajo de 89 % de líneas, 79 % de ramas o 90 % de
+  funciones (requiere Node >= 22.8). CI lo corre en una celda de la matriz, por
+  ahora como paso informativo.
+- Tests de los comandos `status` y `verify` y de la protección de `main`
+  (`github-protect.js`), que casi no tenían: fijan los códigos de salida, el cuerpo
+  exacto que se le envía a GitHub y que los checks requeridos sigan siendo los
+  jobs de los workflows instalados. El typedef `Snapshot` del monitor vuelve a
+  coincidir con lo que la fuente devuelve, y un test lo mantiene así.
 
 ## [3.18.1] — 2026-11-10
 

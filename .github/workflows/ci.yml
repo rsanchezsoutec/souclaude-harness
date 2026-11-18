@@ -55,6 +55,15 @@ jobs:
       # suite sigue en paralelo, que es rapido y no reproduce el problema.
       - run: npm run test:ci
 
+      # Cobertura del codigo del repo (sin contar test/), con piso: falla si baja
+      # de 89 % de lineas, 79 % de ramas o 90 % de funciones. Una sola celda de la
+      # matriz, y por ahora INFORMATIVO (continue-on-error): cuando lleve unas
+      # corridas en verde, quitar esa linea lo vuelve un check de verdad.
+      - name: cobertura con piso (informativo)
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 24
+        continue-on-error: true
+        run: npm run test:cobertura -- --test-concurrency=1
+
       - name: verifica integridad del manifest (huerfanos, rutas rotas, duplicados, criticos)
         run: node bin/cli.mjs verify --strict
 

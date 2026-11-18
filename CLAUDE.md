@@ -144,7 +144,8 @@ infraestructura y todo lo que toca frameworks, en inglés.
   también la prosa de la carpeta.
 - Tests: `npm test` (Node >= 22.4); `npm run check` suma `verify --strict`. La suite
   no depende del entorno: pasa con o sin terminal, con `NO_COLOR` y con las
-  variables de un PR de GitHub Actions.
+  variables de un PR de GitHub Actions. `npm run test:cobertura` (Node >= 22.8)
+  mide la cobertura del código del repo y falla si baja del piso.
 
 ## Economía de tokens
 
