@@ -48,6 +48,12 @@ test('esPuntoDeEntrada: compara rutas reales, no la forma en que se escribio la 
   assert.equal(esPuntoDeEntrada(urlReal, porEnlace), true, 'invocado por un enlace sigue siendo el punto de entrada')
   assert.equal(esPuntoDeEntrada(urlReal, path.join(real, 'otro.mjs')), false)
   assert.equal(esPuntoDeEntrada(urlReal, undefined), false, 'sin argv[1] (import desde un REPL) no es el punto de entrada')
+  // En Windows las rutas no distinguen mayusculas: el mismo archivo escrito con
+  // otra caja sigue siendo el punto de entrada. La plataforma se pasa a mano para
+  // que esa rama corra tambien en Linux y macOS.
+  const otraCaja = path.join(fs.realpathSync.native(real), 'SCRIPT.MJS')
+  assert.equal(esPuntoDeEntrada(urlReal, otraCaja, 'win32'), true)
+  assert.equal(esPuntoDeEntrada(urlReal, path.join(fs.realpathSync.native(real), 'OTRO.MJS'), 'win32'), false)
 })
 
 test('hook reglas-pr invocado por un enlace: sigue denegando el push a main', () => {

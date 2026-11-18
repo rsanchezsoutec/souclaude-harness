@@ -34,8 +34,9 @@
 // tambien los merges directos a dev/main, que en solo no pasan por ningun PR.
 //
 // Limite: el hook lee el TEXTO del comando. Ve el push a traves de envoltorios
-// (`command git push`), agrupaciones (`(git push)`) y comandos anidados (`bash
-// -c`, `eval`), pero no el que hace un script (`./deploy.sh`), un alias
+// (`command git push`), agrupaciones (`(git push)`), comandos anidados (`bash
+// -c`, `eval`) y lanzadores (`start`, `Start-Process`), pero no el que hace un
+// script (`./deploy.sh`), otro programa (`make`, `python -c`), un alias
 // configurado en git o una llamada a la API (`gh api`). Es una red para el
 // error honesto; la barrera de `main` es la proteccion de rama en GitHub.
 import fs from 'node:fs'
@@ -171,7 +172,14 @@ const ES_SHELL = /(^|[\\/])(ba|z|da|k|a)?sh(\.exe)?$/i
 const ES_POWERSHELL = /(^|[\\/])(powershell|pwsh)(\.exe)?$/i
 const ES_CMD = /(^|[\\/])cmd(\.exe)?$/i
 const ES_EVAL = /^(eval|iex|invoke-expression)$/i
+// Programas que LANZAN otro con una sintaxis que no es la de un shell: `start`
+// (cmd y Git Bash) y, en PowerShell, `Start-Process`/`saps`, `Invoke-Command`/
+// `icm` y `Start-Job`/`sajb`.
+const ES_LANZADOR = /^(start|start-process|saps|invoke-command|icm|start-job|sajb)$/i
 const OPCIONES_PUSH_CON_VALOR = new Set(['--repo', '-o', '--push-option', '--receive-pack', '--exec'])
+// El refspec "matching": `:` a secas (o `+:`) sube todas las ramas que existen
+// con el mismo nombre en los dos lados -- main incluida --, igual que --all.
+const REFSPEC_MATCHING = /^\+?:$/
 
 // Lo que puede ir DELANTE de un comando sin cambiar cual es. Los envoltorios son
 // los que el propio Claude Code quita antes de comparar con las reglas de
@@ -230,6 +238,22 @@ export function comandoAnidado(p, shell = 'bash') {
   return null
 }
 
+// Los argumentos del `git push` que lanza un `start` / `Start-Process` /
+// `Invoke-Command`, o null si no lanza ninguno. Las listas de PowerShell
+// (`"push","origin","main"`, `'push origin main'`) y los bloques (`{ git push }`)
+// se abren en palabras sueltas. Es una lectura aproximada: quien la usa marca
+// el push como incierto.
+export function pushLanzado(resto) {
+  const piezas = resto
+    // La ruta de git puede traer espacios (`C:\Program Files\Git\cmd\git.exe`): no se parte.
+    .flatMap((w) => (ES_GIT.test(w) ? [w] : w.split(/[\s,;]+/)))
+    .map((w) => w.replace(/^['"({@]+|['")}]+$/g, ''))
+    .filter(Boolean)
+  if (!piezas.some((w) => ES_GIT.test(w))) return null
+  const i = piezas.indexOf('push')
+  return i === -1 ? null : piezas.slice(i + 1).filter((w) => !ES_GIT.test(w))
+}
+
 // En Git Bash sobre Windows el agente escribe rutas MSYS (`/c/Users/...`), que
 // path.resolve leeria como relativas a la raiz de la unidad actual
 // (`C:\c\Users\...`): la carpeta no existiria y el push quedaria sin revisar.
@@ -271,6 +295,13 @@ function* pushes(comando, cwd, shell = 'bash', nivel = 0) {
       yield* pushes(anidado.comando, carpeta, anidado.shell, nivel + 1)
       continue
     }
+    if (ES_LANZADOR.test(p[0] ?? '')) {
+      // `start git push origin main`, `Start-Process git -ArgumentList push,origin,main`:
+      // lo que se alcanza a leer decide si toca main; el resto se pregunta.
+      const lanzado = pushLanzado(p.slice(1))
+      if (lanzado) yield { dir: carpeta, args: lanzado, incierto: `lo lanza \`${p[0]}\`, que no deja leer sus argumentos con certeza` }
+      continue
+    }
     if (!ES_GIT.test(p[0] ?? '')) continue
 
     let i = 1
@@ -288,8 +319,11 @@ function* pushes(comando, cwd, shell = 'bash', nivel = 0) {
       }
     }
     if (p[i] !== 'push') {
+      // `git send-pack <remoto> <ref>...` es la forma interna de `git push`: se lee
+      // igual, y se pregunta si no toca main.
+      if (p[i] === 'send-pack') yield { dir, args: p.slice(i + 1), incierto: 'usa `git send-pack`, la forma interna de `git push`' }
       // `git -c alias.p=push p origin main`: el subcomando real no se ve.
-      if (alias) yield { dir, args: [], incierto: 'usa un alias de git definido en la misma linea' }
+      else if (alias) yield { dir, args: [], incierto: 'usa un alias de git definido en la misma linea' }
       continue
     }
     const incierto = viaXargs
@@ -348,6 +382,10 @@ export function pushDelComando(comando, cwd, shell = 'bash') {
     const refspecs = posicionales.slice(1)
     const cabezas = []
     for (const refspec of refspecs) {
+      if (REFSPEC_MATCHING.test(refspec)) {
+        extra.push('--branches')
+        continue
+      }
       if (refspec.startsWith(':')) continue // borrar la rama remota
       const origen = refspec.replace(/^\+/, '').split(':')[0]
       cabezas.push(origen === '' || origen === '@' ? 'HEAD' : origen)
@@ -398,6 +436,10 @@ export function destinosDelPush(comando, cwd, shell = 'bash') {
     const borraTodo = args.some((a) => a === '--delete' || /^-[a-zA-Z]*d[a-zA-Z]*$/.test(a))
     const borra = []
     for (const refspec of refspecs) {
+      if (REFSPEC_MATCHING.test(refspec)) {
+        destinos.push(TODAS)
+        continue
+      }
       const [origen, destino] = refspec.replace(/^\+/, '').split(':')
       const ref = destino ?? origen
       destinos.push(ref === 'HEAD' || ref === '@' ? RAMA_ACTUAL : ramaCorta(ref))

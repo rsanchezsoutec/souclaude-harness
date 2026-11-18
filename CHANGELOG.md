@@ -55,6 +55,13 @@ versión, ajustar a él el `to` de las dos migraciones nuevas y regenerar
   `Project-<PREFIJO>` ya no se usa como ruta (ni en los hooks ni en el CLI).
 - **El hook pregunta antes de borrar `dev` en el remoto** (`git push origin
   --delete dev`, `:dev`) en modo equipo: casaba con la regla allow de `git push`.
+- **El hook ve también el push que lanza otro programa y dos formas poco comunes de
+  escribirlo**: `start git push …` (cmd y Git Bash), `Start-Process`/`saps`,
+  `Invoke-Command`/`icm` y `Start-Job` en PowerShell, `git send-pack` y el refspec
+  `:` a secas (el «matching»: sube todas las ramas que coinciden, `main` incluida).
+  Si lo que se alcanza a leer toca `main`, se deniega; el resto de lo que lanzan
+  esos programas se pregunta. Sigue sin verse el push que hace un script u otro
+  programa por dentro: la barrera de `main` es la protección de rama en GitHub.
 - **Skill `soutec-md-a-pdf`**: del HTML crudo del Markdown solo pasa el marcado
   conocido, y el `href` de un enlace va escapado (antes, un `href` con comillas
   cerraba la etiqueta e inyectaba otra, p. ej. un `<img src="file://…">`). El

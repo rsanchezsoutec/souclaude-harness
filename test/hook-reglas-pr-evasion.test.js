@@ -11,6 +11,7 @@ import {
   comandoEfectivo,
   comandoAnidado,
   pushForzado,
+  pushLanzado,
   destinosDelPush,
   pushDelComando,
   cambioDePR,
@@ -167,6 +168,43 @@ test('destinosDelPush: `$(git branch --show-current)` es la rama actual, no algo
   }
 })
 
+test('pushLanzado: abre las listas de PowerShell y los bloques; sin git o sin push no hay nada que leer', () => {
+  assert.deepEqual(pushLanzado(['git', 'push', 'origin', 'main']), ['origin', 'main'])
+  assert.deepEqual(pushLanzado(['git', '-ArgumentList', 'push,origin,main']), ['origin', 'main'])
+  assert.deepEqual(pushLanzado(['-FilePath', 'git', '-ArgumentList', 'push origin main', '-Wait']), ['origin', 'main', '-Wait'])
+  assert.deepEqual(pushLanzado(['-ArgumentList', 'push,origin,main', '-FilePath', 'C:\\Program Files\\Git\\cmd\\git.exe']), ['origin', 'main', '-FilePath'])
+  assert.deepEqual(pushLanzado(['C:\\Program Files\\Git\\cmd\\git.exe push origin main']), ['origin', 'main'], 'el comando entero entre comillas')
+  assert.deepEqual(pushLanzado(['-ScriptBlock', '{', 'git', 'push', 'origin', 'main', '}']), ['origin', 'main'])
+  assert.deepEqual(pushLanzado(['{git', 'push', 'origin', 'main}']), ['origin', 'main'])
+  assert.deepEqual(pushLanzado(['powershell', '-ArgumentList', '-Command git push origin main']), ['origin', 'main'], 'un lanzador que lanza un shell')
+  assert.equal(pushLanzado(['git', '-ArgumentList', 'status']), null)
+  assert.equal(pushLanzado(['notepad', 'git-push-notas.txt']), null)
+  assert.equal(pushLanzado(['gh', 'pr', 'create']), null)
+  assert.equal(pushLanzado([]), null)
+})
+
+test('destinosDelPush: lanzadores, `git send-pack` y el refspec `:` (matching) se leen como un push', () => {
+  const destinos = (comando, shell) => destinosDelPush(comando, CWD, shell).map((d) => d.destinos)
+  // `:` a secas sube todas las ramas que coinciden; no es "borrar la rama vacia".
+  assert.deepEqual(destinos('git push origin :'), [['*']])
+  assert.deepEqual(destinos('git push origin +:'), [['*']])
+  assert.deepEqual(destinosDelPush('git push origin :', CWD)[0].borra, [], 'el refspec matching no borra nada')
+  assert.deepEqual(pushDelComando('git push origin :', CWD).cabezas, ['--branches'], 'el check de secretos mira todas las ramas')
+  assert.deepEqual(destinos('git push origin :vieja'), [['vieja']])
+  assert.deepEqual(destinosDelPush('git push origin :vieja', CWD)[0].borra, ['vieja'])
+  // send-pack: mismos argumentos que push, siempre marcado como incierto.
+  assert.deepEqual(destinos('git send-pack origin main'), [['main']])
+  assert.deepEqual(destinos('git send-pack --all origin'), [['*']])
+  assert.match(destinosDelPush('git send-pack origin fix/M1-x', CWD)[0].incierto, /send-pack/)
+  // Lanzadores: lo que se alcanza a leer, tambien marcado como incierto.
+  assert.deepEqual(destinos('start git push origin main'), [['main']])
+  assert.deepEqual(destinos('Start-Process git -ArgumentList "push","origin","main"', 'powershell'), [['main']])
+  assert.deepEqual(destinos('Invoke-Command -ScriptBlock { git push origin main }', 'powershell'), [['main']])
+  assert.match(destinosDelPush('saps git push,origin,x', CWD, 'powershell')[0].incierto, /saps/)
+  assert.deepEqual(destinos('Start-Process git -ArgumentList status', 'powershell'), [])
+  assert.deepEqual(destinos('start notepad git-push-notas.txt'), [])
+})
+
 test('cambioDePR: tambien ve `gh pr create` detras de un envoltorio', () => {
   assert.equal(cambioDePR('command gh pr create --fill', CWD)?.accion, 'create')
   assert.equal(cambioDePR('env GH_PAGER= gh pr edit 12 --body-file b.md', CWD)?.accion, 'edit')
@@ -286,6 +324,55 @@ test('hook real: borrar `dev` en el remoto se pregunta; borrar una rama de traba
   assert.equal(decision(dir, 'git push origin :main')?.tipo, 'deny')
   // En modo solo no hay gates.
   assert.equal(decision(proyecto({ modo: 'solo' }), 'git push origin --delete dev'), null)
+})
+
+test('hook real: el push que lanza otro programa (start, Start-Process, Invoke-Command) tambien se ve', () => {
+  const dir = proyecto()
+  for (const comando of ['start git push origin main', 'start "" git push origin main', 'start /b git push origin HEAD:main']) {
+    assert.equal(decision(dir, comando)?.tipo, 'deny', comando)
+  }
+  for (const comando of [
+    'Start-Process git -ArgumentList "push","origin","main"',
+    "Start-Process -FilePath git -ArgumentList 'push origin main' -Wait",
+    'Start-Process -ArgumentList push,origin,main -FilePath "C:\\Program Files\\Git\\cmd\\git.exe"',
+    "Start-Process powershell -ArgumentList '-Command git push origin main'",
+    'saps git push,origin,main',
+    'Invoke-Command -ScriptBlock { git push origin main }',
+    'icm { git push origin main }',
+    'Start-Job { git push origin main }',
+  ]) {
+    assert.equal(decision(dir, comando, { toolName: 'PowerShell' })?.tipo, 'deny', comando)
+  }
+  // A una rama de trabajo no se deniega, pero la lectura es aproximada: se pregunta.
+  const d = decision(dir, 'Start-Process git -ArgumentList "push","origin","fix/M1-algo"', { toolName: 'PowerShell' })
+  assert.equal(d?.tipo, 'ask')
+  assert.match(d.motivo, /Start-Process/)
+  assert.equal(decision(dir, 'start /b git push origin fix/M1-algo')?.tipo, 'ask')
+  // Lanzar otra cosa no molesta.
+  for (const [comando, toolName] of [
+    ['Start-Process git -ArgumentList status', 'PowerShell'],
+    ['Start-Process notepad notas.txt', 'PowerShell'],
+    ['Start-Process gh -ArgumentList "pr","view"', 'PowerShell'],
+    ['start notepad git-push-notas.txt', 'Bash'],
+  ]) {
+    assert.equal(decision(dir, comando, { toolName }), null, comando)
+  }
+  // En modo solo no hay gates.
+  assert.equal(decision(proyecto({ modo: 'solo' }), 'start git push origin main'), null)
+})
+
+test('hook real: `git send-pack` y el refspec `:` suben main igual que un push', () => {
+  const dir = proyecto()
+  for (const comando of ['git send-pack origin main', 'git send-pack --all origin', 'command git send-pack origin HEAD:main', 'git push origin :', 'git push origin +:', 'git push -u origin :']) {
+    const d = decision(dir, comando)
+    assert.equal(d?.tipo, 'deny', comando)
+    assert.match(d.motivo, /SHS-M42/, comando)
+  }
+  const d = decision(dir, 'git send-pack origin fix/M1-algo')
+  assert.equal(d?.tipo, 'ask')
+  assert.match(d.motivo, /send-pack/)
+  // Borrar una rama de trabajo es `:rama`, no el `:` a secas: sigue sin molestar.
+  assert.equal(decision(dir, 'git push origin :fix/M1-vieja'), null)
 })
 
 test('hook real: el trabajo normal no se toca (ni deny ni pregunta)', () => {
