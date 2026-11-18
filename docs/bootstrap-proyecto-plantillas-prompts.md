@@ -307,7 +307,7 @@ otra máquina, nada de esto se hereda solo. En orden:
    paso a paso del login está en la guía de onboarding).
 2. **Clona el repo del proyecto** en una ruta **fuera de OneDrive**.
 3. **Clona el Vault** ({{VAULT_REPO}}) también fuera de OneDrive y conéctalo:
-   `npx souclaude upgrade --vault-path {{RUTA_VAULT}}`.
+   `npx github:soutecdev/souclaude-harness#v3 upgrade --vault-path {{RUTA_VAULT}}`.
 4. **Añade a mano `"project"`** a `.claude/vault.local.json` (problema conocido
    de la fase 4: el CLI no lo escribe y el hook queda ciego en silencio si el
    Vault tiene más de un proyecto):

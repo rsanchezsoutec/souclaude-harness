@@ -24,7 +24,7 @@ carpeta directamente como base del §2.
 > git clone https://github.com/soutecdev/soubunker-vault.git
 > ```
 >
-> Y ni eso hace falta a mano: `npx souclaude` en cualquier repo de proyecto pregunta si lo
+> Y ni eso hace falta a mano: `npx github:soutecdev/souclaude-harness#v3` en cualquier repo de proyecto pregunta si lo
 > tienes y lo clona por ti (§4). El resto de esta sección es **la creación desde cero**, que
 > ya se hizo una vez y se conserva como referencia.
 
@@ -150,7 +150,7 @@ partición por proyecto de la §7 de la guía.
 
 ## 4. Conectar cada repo de código al Vault
 
-**Lo hace el instalador.** Al correr `npx souclaude` (harness ≥ 2.3.0) en un repo de
+**Lo hace el instalador.** Al correr `npx github:soutecdev/souclaude-harness#v3` (harness ≥ 2.3.0) en un repo de
 proyecto, después de aplicar el plan aparece el paso del Vault:
 
 1. *¿Tienes el Vault clonado en esta máquina?*
@@ -162,9 +162,9 @@ proyecto, después de aplicar el plan aparece el paso del Vault:
 Sin modo interactivo:
 
 ```powershell
-npx souclaude upgrade --vault-path "C:/ruta/a/soubunker-vault"
-npx souclaude init --no-vault          # omitir el paso por completo
-npx souclaude init --vault-repo <url>  # clonar otro repo (casos raros)
+npx github:soutecdev/souclaude-harness#v3 upgrade --vault-path "C:/ruta/a/soubunker-vault"
+npx github:soutecdev/souclaude-harness#v3 init --no-vault          # omitir el paso por completo
+npx github:soutecdev/souclaude-harness#v3 init --vault-repo <url>  # clonar otro repo (casos raros)
 ```
 
 Con `--yes` o en CI el paso **nunca clona**: solo usa `--vault-path` si se lo pasas. Si no
@@ -204,7 +204,7 @@ un PR.
 - [ ] Una `Project-<PREFIJO>/` por proyecto activo, cada una con `kanban.md` semilla.
 - [ ] `.gitignore` ignora el estado local de Obsidian, versiona el resto de `.obsidian/`.
 - [ ] Obsidian abre la carpeta como vault y el plugin **Kanban** está habilitado.
-- [ ] Cada repo de código corrió `npx souclaude` y tiene su `.claude/vault.local.json`.
+- [ ] Cada repo de código corrió `npx github:soutecdev/souclaude-harness#v3` y tiene su `.claude/vault.local.json`.
 - [ ] El `main` del Vault **no** exige revisión: los agentes pushean directo (§4).
 - [ ] Regla de oro anunciada: **sin milestone del Vault no hay rama, y una rama por
       milestone** (las tareas son commits en esa rama, no ramas propias).

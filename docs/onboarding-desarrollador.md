@@ -52,11 +52,11 @@ logins por ti; estos tres pasos son tuyos):
   El login es una sola vez por máquina; el token queda guardado en tu perfil.
   Aprobar y mergear PRs sigue siendo del coordinador: `gh` no cambia quién
   decide, solo quién tipea.
-- (Próximamente, milestone SHS-M10: `npx souclaude init/upgrade` verificará estos
+- (Próximamente, milestone SHS-M10: `npx github:soutecdev/souclaude-harness#v3 init/upgrade` verificará estos
   requisitos y avisará con el paso exacto si falta alguno.)
 
 ```bash
-npx souclaude init        # en un repo nuevo (o `upgrade` en uno ya instalado)
+npx github:soutecdev/souclaude-harness#v3 init        # en un repo nuevo (o `upgrade` en uno ya instalado)
 ```
 
 - El instalador pregunta qué **skills** instalar (`soutec-github` es obligatoria;
@@ -93,7 +93,7 @@ npx souclaude init        # en un repo nuevo (o `upgrade` en uno ya instalado)
   próximo `souclaude upgrade`.
 
 > **¿Trabajas solo?** El harness también se instala en **modo solo** (single
-> coder): `npx souclaude init --solo`, o eligiéndolo en el prompt. Sin
+> coder): `npx github:soutecdev/souclaude-harness#v3 init --solo`, o eligiéndolo en el prompt. Sin
 > milestones ni PRs obligatorios — el agente mergea directo a `dev` y `main` — y
 > la trazabilidad se reduce a una línea por bloque de trabajo en
 > `Project-<PREFIJO>/worklog.md` del Vault. Esta guía describe el **modo

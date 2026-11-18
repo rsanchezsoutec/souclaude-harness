@@ -75,7 +75,7 @@ test('lockfile dañado: error que lo nombra, en vez de tratar al repo como "sin 
 // terminado de aplicar: fuera de este repo, `npx souclaude` no trae el harness,
 // trae lo que haya en el registro publico de npm con ese nombre -- que no es
 // nuestro y cualquiera puede registrar. Este test es el candado.
-test('ninguna plantilla ni mensaje del CLI manda a correr `npx souclaude` (nombre corto)', async () => {
+test('ninguna plantilla, mensaje del CLI ni guia manda a correr `npx souclaude` (nombre corto)', async () => {
   const fs = await import('node:fs')
   const path = await import('node:path')
   const { fileURLToPath } = await import('node:url')
@@ -86,21 +86,32 @@ test('ninguna plantilla ni mensaje del CLI manda a correr `npx souclaude` (nombr
     /^\s*\/\//, // comentarios del codigo que explican por que no se usa
   ]
   const hallazgos = []
+  const revisar = (abs) => {
+    if (!/\.(md|mjs|js|json|yml|txt|example|html|svg)$/.test(abs)) return
+    fs.readFileSync(abs, 'utf8').split('\n').forEach((linea, i) => {
+      if (/npx souclaude(?!-harness)/.test(linea) && !PERMITIDAS.some((p) => p.test(linea))) {
+        hallazgos.push(`${path.relative(raiz, abs)}:${i + 1}`)
+      }
+    })
+  }
   const recorrer = (dir) => {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
       const abs = path.join(dir, e.name)
       if (e.isDirectory()) recorrer(abs)
-      else if (/\.(md|mjs|js|json|yml|txt|example)$/.test(e.name)) {
-        fs.readFileSync(abs, 'utf8').split('\n').forEach((linea, i) => {
-          if (/npx souclaude(?!-harness)/.test(linea) && !PERMITIDAS.some((p) => p.test(linea))) {
-            hallazgos.push(`${path.relative(raiz, abs)}:${i + 1}`)
-          }
-        })
-      }
+      else revisar(abs)
     }
   }
   recorrer(path.join(raiz, 'templates'))
   recorrer(path.join(raiz, 'src'))
+  // Las guias, infografias y laminas son lo que un dev nuevo copia y pega en una
+  // maquina sin nada instalado: ahi el nombre corto si sale al registro publico.
+  // Los ADR quedan fuera: son el registro historico de lo que se decidio.
+  for (const e of fs.readdirSync(path.join(raiz, 'docs'), { withFileTypes: true })) {
+    const abs = path.join(raiz, 'docs', e.name)
+    if (!e.isDirectory()) revisar(abs)
+    else if (e.name !== 'decisions') recorrer(abs)
+  }
+  for (const suelto of ['README.md', 'MAINTAINERS.md']) revisar(path.join(raiz, suelto))
   assert.deepEqual(hallazgos, [], `usa la forma con el repo (npx github:soutecdev/souclaude-harness#v3) o el CLI global: ${hallazgos.join(', ')}`)
 })
 

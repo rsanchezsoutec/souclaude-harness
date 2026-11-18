@@ -137,6 +137,11 @@ versión, ajustar a él el `to` de las dos migraciones nuevas y regenerar
   anterior —solo lo que sigue idéntico; lo que agregaste o reescribiste queda— y el
   resultado es el de una instalación de cero en ese modo, como describe el ADR
   20260915. Vale también para un lockfile anterior al modo solo que elige `solo`.
+- Las guías, infografías y láminas de `docs/` seguían nombrando `npx souclaude` (el
+  nombre corto, libre en el registro público) y el paso manual de agregar
+  `"project"` a `vault.local.json`. El test que prohíbe el nombre corto ahora las
+  cubre.
+
 ### Agregado
 
 - `souclaude verify` valida el contrato del manifest entry por entry (policy,
