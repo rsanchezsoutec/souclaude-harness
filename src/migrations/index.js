@@ -86,6 +86,41 @@ export const migrations = [
       return changed ? stringifyJson(json) : content
     },
   },
+  {
+    // El hook de SessionStart se registraba con una ruta RELATIVA
+    // (`node .claude/hooks/declarar-milestone.mjs`). Claude Code corre los hooks
+    // en el directorio actual de la sesion: tras un `cd` del agente, el
+    // SessionStart de un resume / clear / compact no encontraba el script y la
+    // regla del milestone no volvia a inyectarse justo cuando el contexto se
+    // habia perdido. Pasa a ${CLAUDE_PROJECT_DIR}, igual que reglas-pr, y con
+    // plazo (sin `timeout` el default es de 10 minutos). merge-json solo agrega:
+    // sin esta migracion el comando viejo quedaria registrado al lado del nuevo.
+    // `to` es el primer release que la incluye: ajustarlo al publicar.
+    id: 'v3-settings-session-start-ruta-absoluta',
+    to: '3.19.0',
+    dest: '.claude/settings.json',
+    describe:
+      'settings.json: el hook de SessionStart pasa a `${CLAUDE_PROJECT_DIR}` (la ruta relativa fallaba si la sesión había cambiado de carpeta) y gana un plazo de 60 s',
+    transform(content) {
+      const json = parseJson(content, '.claude/settings.json')
+      if (json == null) return content
+      const VIEJOS = {
+        'node .claude/hooks/declarar-milestone.mjs': 'node "${CLAUDE_PROJECT_DIR}/.claude/hooks/declarar-milestone.mjs"',
+        'node .claude/hooks/worklog-solo.mjs': 'node "${CLAUDE_PROJECT_DIR}/.claude/hooks/worklog-solo.mjs"',
+      }
+      let changed = false
+      for (const grupo of Array.isArray(json.hooks?.SessionStart) ? json.hooks.SessionStart : []) {
+        for (const hook of Array.isArray(grupo?.hooks) ? grupo.hooks : []) {
+          if (typeof hook?.command === 'string' && Object.hasOwn(VIEJOS, hook.command)) {
+            hook.command = VIEJOS[hook.command]
+            hook.timeout ??= 60
+            changed = true
+          }
+        }
+      }
+      return changed ? stringifyJson(json) : content
+    },
+  },
 ]
 
 // Devuelve las migraciones aplicables a `dest` para pasar de `fromVersion` al

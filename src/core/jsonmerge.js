@@ -16,14 +16,29 @@ export function seedMerge(existing, seed) {
       out[key] = seedMerge(out[key], value)
     } else if (Array.isArray(out[key]) && Array.isArray(value)) {
       // Union preservando el orden del usuario primero.
-      const seen = new Set(out[key].map((v) => JSON.stringify(v)))
+      const seen = new Set(out[key].map(claveDeElemento))
       for (const v of value) {
-        if (!seen.has(JSON.stringify(v))) out[key].push(v)
+        if (!seen.has(claveDeElemento(v))) out[key].push(v)
       }
     }
     // Escalar ya presente -> se respeta el del usuario.
   }
   return out
+}
+
+// Como se reconoce que un elemento del seed "ya esta" en el array del usuario.
+// Para casi todo, por igualdad exacta. Para un grupo de hooks de Claude Code
+// ({ matcher, hooks: [{ type, command, if, timeout }] }), por su identidad: a que
+// tool aplica y que ejecuta. Lo demas (timeout...) son ajustes: con la igualdad
+// exacta, que el usuario cambiara el timeout de un hook del harness hacia que el
+// proximo upgrade agregara OTRA copia del grupo, y el hook corria dos veces (en
+// reglas-pr, dos comentarios por PR).
+function claveDeElemento(v) {
+  if (isPlainObject(v) && Array.isArray(v.hooks) && v.hooks.length > 0 && v.hooks.every(isPlainObject)) {
+    const ejecuta = v.hooks.map((h) => [h.type ?? null, h.command ?? h.url ?? h.prompt ?? null, h.if ?? null])
+    return JSON.stringify(['grupo-de-hooks', v.matcher ?? null, ejecuta])
+  }
+  return JSON.stringify(v)
 }
 
 function isPlainObject(v) {
