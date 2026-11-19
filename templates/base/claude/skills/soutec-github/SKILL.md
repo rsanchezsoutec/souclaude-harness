@@ -197,6 +197,12 @@ checks de `scripts/check-pr-rules.mjs` y te da el resultado antes que CI:
   (`soubunker-vault`) o por su carpeta `00-System`, en los dos modos. Si aun así
   deniega un push al Vault, configúralo: `souclaude upgrade --vault-path <ruta>`;
   y el espejo va siempre por `souclaude vault-sync --push`.
+- **Escribe el push con la carpeta, el remoto y la rama literales** (`cd <ruta>
+  && git push origin <rama>`). El hook lee el texto del comando: si la rama o la
+  carpeta salen de una variable o de una sustitución (`$RAMA`, `$(…)`,
+  `cd "$DESTINO"`), o si el push es forzado o borra `dev`, no adivina y
+  **pregunta** al usuario; en una sesión donde nadie puede responder, eso es una
+  denegación. `"$(git branch --show-current)"` sí lo resuelve: es la rama actual.
 - **Antes de cada `git push`, los secretos**: el grupo `secretos` sobre cada
   commit que el push subiría. Si falla, el push queda denegado con el motivo:
   sigue sus instrucciones (sacar el archivo de los commits sin pushear; si ya se
