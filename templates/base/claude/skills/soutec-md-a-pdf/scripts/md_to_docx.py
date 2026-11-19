@@ -708,6 +708,8 @@ def render(md_path, out_path, args):
             sys.exit(f"No se encontró el logo del cliente: {client_logo}\n"
                      "Envía la imagen del logo (PNG/JPG, preferible con fondo "
                      "transparente) o corrige la ruta con --client-logo.")
+        if not client_logo.lower().endswith((".png", ".jpg", ".jpeg")):
+            sys.exit(f"El logo del cliente debe ser una imagen PNG o JPG: {client_logo}")
 
     want_cover = not args.no_cover
     want_toc = not args.no_toc
@@ -794,6 +796,7 @@ def render(md_path, out_path, args):
 
 
 def main():
+    core.salida_utf8()
     ap = argparse.ArgumentParser(
         description="Convierte Markdown a DOCX corporativo Soutec (python-docx).")
     ap.add_argument("input")

@@ -116,6 +116,14 @@ versión, ajustar a él el `to` de las dos migraciones nuevas y regenerar
   Si falta una dependencia, lo dice con el paquete a instalar en vez de un
   traceback, y `--to pdf` ya no exige `python-docx`. La skill indica un entorno
   virtual y deja de sugerir `--break-system-packages`.
+- **Skill `soutec-md-a-pdf`, probada de punta a punta con sus bibliotecas reales.**
+  Un bloque de código más alto que una página abortaba el PDF (`LayoutError`):
+  ahora continúa en la página siguiente. En Windows los mensajes de la skill salían
+  en la página de códigos de la consola y las tildes llegaban rotas a quien los lee
+  como UTF-8 (lo encontró el CI de Windows): la salida es siempre UTF-8. Una imagen
+  en el cuerpo desaparecía sin dejar rastro: queda como «[Imagen: …]». Un
+  `--client-logo` que no es PNG o JPG se rechaza con un mensaje claro.
+  `requirements.txt` fija las versiones con las que se probó.
 - **`souclaude status` ya no dice «hay un upgrade disponible» para siempre.** Una
   propuesta `.new` ya escrita y al día contaba como cambio pendiente: en cualquier
   repo con un archivo propio que el harness no pisa (su README, un `CLAUDE.md`

@@ -152,5 +152,32 @@ class TitulosYFrontMatter(unittest.TestCase):
         self.assertEqual(cuerpo, "# Cuerpo\n")
 
 
+class ImagenesYSalida(unittest.TestCase):
+    def test_una_imagen_del_cuerpo_no_desaparece_en_silencio(self):
+        # Los motores no incrustan imagenes; antes se perdian sin dejar rastro.
+        self.assertEqual(bloques('<p>Antes <img src="img/flujo.png" alt="diagrama de flujo"> y despues</p>')[0]["text"],
+                         "Antes [Imagen: diagrama de flujo] y despues")
+        self.assertEqual(bloques('<p><img src="img/flujo.png?v=2"/></p>')[0]["text"], "[Imagen: flujo.png]")
+        self.assertEqual(bloques('<p><img alt="a &lt;b&gt;"></p>')[0]["text"], "[Imagen: a &lt;b&gt;]")
+        self.assertEqual(bloques("<p><img></p>")[0]["text"], "[Imagen: sin descripción]")
+
+    def test_los_mensajes_salen_en_utf8_aunque_la_consola_use_otra_pagina_de_codigos(self):
+        # En Windows la consola es cp1252: sin forzar UTF-8, quien lee la salida
+        # como UTF-8 (Claude Code) veia las tildes rotas.
+        import io
+        crudo = io.BytesIO()
+        consola = io.TextIOWrapper(crudo, encoding="cp1252")  # se guarda: al soltarla cerraria `crudo`
+        original = sys.stderr
+        sys.stderr = consola
+        try:
+            sm.salida_utf8()
+            print("Falta el módulo; instálalo", file=sys.stderr)
+            consola.flush()
+            escrito = crudo.getvalue()
+        finally:
+            sys.stderr = original
+        self.assertEqual(escrito.decode("utf-8").strip(), "Falta el módulo; instálalo")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

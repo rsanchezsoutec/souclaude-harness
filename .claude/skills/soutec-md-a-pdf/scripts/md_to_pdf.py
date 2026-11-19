@@ -520,7 +520,7 @@ def blocks_to_flowables(blocks, S):
             story.append(_make_table(b, S))
             suppress_indent = False
         elif t == "code":
-            story.append(_make_code(b["text"], S))
+            story.extend(_make_code(b["text"], S))
             suppress_indent = False
         elif t == "callout":
             # Los blockquotes se renderizan como nota en texto plano (sin caja ni
@@ -597,19 +597,34 @@ def _wrap_spaced(fl):
     return fl
 
 
+# Un bloque de hasta estas líneas no se separa de su contexto; uno más largo
+# tiene que poder continuar en la página siguiente.
+CODE_KEEP_LINES = 25
+
+
 def _make_code(text, S):
-    pre = Preformatted(text, S["code"])
-    tbl = Table([[pre]], colWidths=[CONTENT_W])
+    """Devuelve la lista de flowables del bloque de código.
+
+    Una fila por línea: una tabla se parte entre filas, así que un bloque más alto
+    que la página sigue en la siguiente. Con el bloque entero en una sola celda,
+    ReportLab abortaba el PDF con LayoutError."""
+    lineas = text.rstrip("\n").split("\n")
+    filas = [[Preformatted(linea or " ", S["code"])] for linea in lineas]
+    ultima = len(filas) - 1
+    tbl = Table(filas, colWidths=[CONTENT_W])
     tbl.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, -1), CODEBG),
         ("LINEBEFORE", (0, 0), (0, -1), 2.5, DEEP),
         ("BOX", (0, 0), (-1, -1), 0.6, RULE),
         ("LEFTPADDING", (0, 0), (-1, -1), 8),
         ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-        ("TOPPADDING", (0, 0), (-1, -1), 6),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, 0), 6),
+        ("BOTTOMPADDING", (0, ultima), (-1, ultima), 6),
     ]))
-    return KeepTogether([Spacer(0, 0.1 * cm), tbl, Spacer(0, 0.2 * cm)])
+    bloque = [Spacer(0, 0.1 * cm), tbl, Spacer(0, 0.2 * cm)]
+    return [KeepTogether(bloque)] if len(filas) <= CODE_KEEP_LINES else bloque
 
 
 # ============================================================
@@ -645,6 +660,8 @@ def render(md_path, out_path, args):
             sys.exit(f"No se encontró el logo del cliente: {client_logo}\n"
                      "Envía la imagen del logo (PNG/JPG, preferible con fondo "
                      "transparente) o corrige la ruta con --client-logo.")
+        if not client_logo.lower().endswith((".png", ".jpg", ".jpeg")):
+            sys.exit(f"El logo del cliente debe ser una imagen PNG o JPG: {client_logo}")
 
     want_cover = not args.no_cover
     want_toc = not args.no_toc
@@ -726,6 +743,7 @@ def render(md_path, out_path, args):
 
 
 def main():
+    core.salida_utf8()
     ap = argparse.ArgumentParser(description="Convierte Markdown a PDF corporativo Soutec (ReportLab).")
     ap.add_argument("input")
     ap.add_argument("output", nargs="?")

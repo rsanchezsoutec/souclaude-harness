@@ -49,6 +49,20 @@ test('skill soutec-md-a-pdf: si falta una dependencia lo dice con el paquete a i
   }
 })
 
+// En Windows la consola usa cp1252 y Python escribe ahi sus mensajes: quien los
+// lee como UTF-8 (Claude Code, este test) recibia «m\ufffddulo», «tambi\ufffdn». Lo
+// encontro el CI de Windows. PYTHONIOENCODING=cp1252 reproduce esa consola en
+// cualquier sistema (por eso este caso no usa -I, que ignora las variables PYTHON*).
+test('skill soutec-md-a-pdf: sus mensajes salen en UTF-8 aunque la consola use otra pagina de codigos', { skip }, () => {
+  const r = spawnSync(PY, ['-B', '-s', path.join(SCRIPTS, 'md_to_soutec.py'), '--help'], {
+    encoding: 'utf8',
+    env: { ...process.env, PYTHONIOENCODING: 'cp1252', PYTHONUTF8: '0' },
+  })
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(r.stdout, /también/, 'las tildes llegaron rotas: la salida no es UTF-8')
+  assert.ok(!r.stdout.includes('\ufffd'), 'hay caracteres de reemplazo en la salida')
+})
+
 test('skill soutec-md-a-pdf: correr sus pruebas no deja __pycache__ dentro de templates/', { skip }, () => {
   assert.ok(!fs.existsSync(path.join(SCRIPTS, '__pycache__')))
 })

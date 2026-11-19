@@ -102,9 +102,11 @@ Paquetes de Python puro, instalables con pip en cualquier SO:
 
 ```bash
 python -m venv .venv-soutec-pdf
-.venv-soutec-pdf/bin/python -m pip install reportlab pillow markdown python-docx
+.venv-soutec-pdf/bin/python -m pip install -r .claude/skills/soutec-md-a-pdf/requirements.txt
 ```
 
+`requirements.txt` fija las versiones con las que la skill se probó de punta a
+punta; si alguna no existe para tu Python, instala la más reciente que haya.
 (`reportlab` dibuja el PDF, `python-docx` escribe el Word, `pillow` maneja los
 PNG de marca y genera las franjas, `markdown` parsea el `.md`.) En Windows el
 intérprete del entorno es `.venv-soutec-pdf\Scripts\python.exe`. Úsalo también

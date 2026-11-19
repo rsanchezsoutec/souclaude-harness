@@ -277,6 +277,13 @@
       "skill": "soutec-md-a-pdf"
     },
     {
+      "id": "skill-soutec-md-a-pdf-requirements",
+      "src": "base/claude/skills/soutec-md-a-pdf/requirements.txt",
+      "dest": ".claude/skills/soutec-md-a-pdf/requirements.txt",
+      "policy": "managed",
+      "skill": "soutec-md-a-pdf"
+    },
+    {
       "id": "skill-soutec-md-a-pdf-isotipo-color",
       "src": "base/claude/skills/soutec-md-a-pdf/assets/soutec_isotipo_3d_color.png",
       "dest": ".claude/skills/soutec-md-a-pdf/assets/soutec_isotipo_3d_color.png",

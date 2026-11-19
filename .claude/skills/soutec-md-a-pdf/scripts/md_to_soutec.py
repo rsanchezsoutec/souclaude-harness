@@ -31,6 +31,19 @@ FORMATS = {"pdf": "pdf", "docx": "docx", "doc": "docx", "word": "docx"}
 PAQUETES = {"docx": "python-docx", "PIL": "pillow"}
 
 
+def salida_utf8():
+    """Fuerza UTF-8 en stdout y stderr: la salida la lee Claude Code (como UTF-8)
+    y, en Windows, la consola usa otra página de códigos, así que las tildes de
+    los mensajes llegaban rotas. Es la misma función de soutec_md.py; se repite
+    acá porque el lanzador no puede importar el núcleo antes de saber si están
+    sus dependencias."""
+    for flujo in (sys.stdout, sys.stderr):
+        try:
+            flujo.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def falta_dependencia(error, fmt):
     paquete = PAQUETES.get(error.name, error.name)
     sys.exit(
@@ -54,6 +67,7 @@ def cargar_motor(fmt):
 
 
 def main():
+    salida_utf8()
     ap = argparse.ArgumentParser(
         description="Convierte Markdown a PDF y/o DOCX corporativo Soutec.")
     ap.add_argument("input")

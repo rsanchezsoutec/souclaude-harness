@@ -14,7 +14,9 @@ No agregues aquí nada específico de un formato.
 """
 import datetime
 import html as html_mod
+import os
 import re
+import sys
 from html.parser import HTMLParser
 
 import markdown
@@ -111,6 +113,28 @@ BLOCK = {"h1", "h2", "h3", "h4", "p", "ul", "ol", "li",
 INLINE = {"b", "strong", "i", "em", "code", "sub", "sup"}
 
 
+def salida_utf8():
+    """Fuerza UTF-8 en stdout y stderr.
+
+    La salida de la skill la lee Claude Code (como UTF-8) y terminales con otra
+    página de códigos -- cp1252 en Windows --: sin esto las tildes de los
+    mensajes llegaban rotas («módulo» se leía «m?dulo»)."""
+    for flujo in (sys.stdout, sys.stderr):
+        try:
+            flujo.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
+def texto_de_imagen(atributos):
+    """Lo que queda en el documento en lugar de una imagen del cuerpo. Los motores
+    no incrustan imágenes: antes desaparecían sin dejar rastro; ahora queda dicho
+    que ahí había una, con su texto alternativo o el nombre del archivo."""
+    alt = (atributos.get("alt") or "").strip()
+    nombre = os.path.basename((atributos.get("src") or "").split("?")[0].rstrip("/"))
+    return html_mod.escape(f"[Imagen: {alt or nombre or 'sin descripción'}]")
+
+
 class BlockBuilder(HTMLParser):
     """Convierte el HTML que produce `markdown` en bloques neutros.
 
@@ -164,6 +188,8 @@ class BlockBuilder(HTMLParser):
                         self.buf.append(f'<a href="{html_mod.escape(href, quote=True)}">')
                 elif tag == "br":
                     self.buf.append("<br/>")
+                elif tag == "img":
+                    self.buf.append(texto_de_imagen(d))
                 elif tag in INLINE:
                     self.buf.append(f"<{tag}>")
             return
@@ -214,6 +240,8 @@ class BlockBuilder(HTMLParser):
     def handle_startendtag(self, tag, attrs):
         if tag == "br" and self.buf is not None:
             self.buf.append("<br/>")
+        elif tag == "img" and self.buf is not None:
+            self.buf.append(texto_de_imagen(dict(attrs)))
         elif tag == "hr":
             self.blocks.append({"t": "hr"})
 
