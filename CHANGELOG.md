@@ -213,11 +213,11 @@ versión, ajustar a él el `to` de las dos migraciones nuevas y regenerar
   de clave privada y tokens con prefijo propio (AWS, GitHub, Anthropic, Slack,
   Google, npm) en las líneas que se agregan. Es informativo: no cambia el resultado
   del check ni imprime el valor, y sin hallazgos la salida es la de siempre. El hook
-  lo muestra en la tabla del PR («OK, con avisos») y se lo pasa al agente. Tiene
-  su propio plazo (8 s) para no demorar el resultado que sí bloquea, y antes de un
-  push no corre si ya hay un archivo de credenciales; leer el diff no ejecuta los
-  filtros `textconv` del repo. No reemplaza a un escáner de secretos ni a la
-  protección de push de GitHub.
+  lo muestra en la tabla del PR («OK, con avisos») y se lo pasa al agente. Corre
+  al validar el PR (en la sesión y en CI), no antes de cada push: ahí se sigue
+  mirando solo el nombre de los archivos, que es lo que bloquea. Tiene su propio
+  plazo (8 s) y leer el diff no ejecuta los filtros `textconv` del repo. No
+  reemplaza a un escáner de secretos ni a la protección de push de GitHub.
 - **Aviso previo al merge del release**: si el PR `dev` → `main` propone una versión
   y `package.json` dice otra, `pr-metadata` lo avisa antes del merge (no bloquea).
 - **Piso de cobertura**: `npm run test:cobertura` mide solo el código del repo

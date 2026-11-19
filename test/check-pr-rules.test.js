@@ -510,10 +510,11 @@ test('secretos: una credencial pegada en un archivo cualquiera se avisa, sin cam
   assert.match(r.stdout, /^\[AVISO\] sin-secretos-en-contenido: .*clave de acceso de AWS en src\/config\.js:2/m)
   assert.ok(!r.stdout.includes(CLAVE_AWS), 'el check imprimio la credencial')
 
-  // Lo que corre el hook antes del push tambien lo ve.
+  // Antes del push corre solo lo que puede denegarlo: el aviso va en el check del PR.
   const sinPushear = correrCheck(dir, ['--grupo', 'secretos', '--sin-pushear'])
   assert.equal(sinPushear.status, 0)
-  assert.match(sinPushear.stdout, /^\[AVISO\] sin-secretos-en-contenido: .*src\/config\.js:2/m)
+  assert.match(sinPushear.stdout, /^\[OK  \] sin-secretos: /m)
+  assert.doesNotMatch(sinPushear.stdout, /sin-secretos-en-contenido/)
 
   // Un archivo de credenciales sigue siendo FAIL, con o sin aviso de contenido.
   commitear(dir, { '.env': 'X=1\n' }, 'feat: env')
@@ -522,7 +523,7 @@ test('secretos: una credencial pegada en un archivo cualquiera se avisa, sin cam
   assert.match(conArchivo.stdout, /^\[FAIL\] sin-secretos: /m)
 })
 
-test('secretos antes del push: con un archivo de credenciales no se espera al chequeo de contenido', () => {
+test('secretos antes del push: el resultado que deniega no espera al chequeo de contenido', () => {
   const dir = repoConBase()
   commitear(dir, { '.env': 'X=1\n', 'src/config.js': `export const clave = "${CLAVE_AWS}"\n` }, 'feat: config')
 

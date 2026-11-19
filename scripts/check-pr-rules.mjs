@@ -20,8 +20,8 @@
 //
 // Ademas, dos AVISOS que nunca cambian el codigo de salida ni aparecen si no hay
 // nada que decir: posibles credenciales en el CONTENIDO de las lineas agregadas
-// (grupo secretos) y, en un PR dev -> main, una version sugerida distinta de la
-// de package.json (grupo pr-metadata).
+// (grupo secretos, al validar un PR: no con --sin-pushear) y, en un PR dev ->
+// main, una version sugerida distinta de la de package.json (grupo pr-metadata).
 //
 // Uso:
 //   node scripts/check-pr-rules.mjs --grupo rama-commits [--pr <n|url>]
@@ -204,13 +204,12 @@ function archivosSinPushear(cabeza) {
 }
 
 // El texto de lo que se agrega o modifica, sin contexto (-U0): es lo que revisa
-// secretosEnContenido. Tiene su propio plazo, bien por debajo de los 30 s que
-// el hook le da a este script antes de un push: en un primer push con mucha
-// historia, `git log -p` puede tardar mas que eso, y el resultado que bloquea
-// (el de nombres de archivo) no puede perderse por esperar a un aviso. Un diff
-// gigante corta por maxBuffer. En los dos casos el chequeo de contenido se
-// informa como no revisado; nunca tumba el check. --no-ext-diff y --no-textconv:
-// leer el diff no ejecuta los programas que el repo tenga configurados para eso.
+// secretosEnContenido. Tiene su propio plazo, bien por debajo del que el hook
+// le da a este script: el resultado que bloquea (el de nombres de archivo) no
+// puede perderse por esperar a un aviso. Un diff gigante corta por maxBuffer.
+// En los dos casos el chequeo de contenido se informa como no revisado; nunca
+// tumba el check. --no-ext-diff y --no-textconv: leer el diff no ejecuta los
+// programas que el repo tenga configurados para eso.
 const PLAZO_DEL_CONTENIDO = 8_000
 
 function diffDe(args) {
@@ -225,10 +224,6 @@ function diffDe(args) {
 
 function diffAgregado(baseRef, cabeza) {
   return diffDe(['diff', `${baseRef}..${cabeza}`])
-}
-
-function diffSinPushear(cabeza) {
-  return diffDe(['log', cabeza, '--not', '--remotes=origin', '-p', '--format='])
 }
 
 function tagsRemotos() {
@@ -570,11 +565,11 @@ function evaluar(values) {
   }
   if (values.grupo === 'secretos') {
     if (values['sin-pushear']) {
-      const porNombre = evaluaSecretos(archivosSinPushear(values.cabeza || 'HEAD'), 'en commits sin pushear')
-      resultados.push(porNombre)
-      // Con un archivo de credenciales el push ya se deniega: ese resultado no
-      // espera a que ademas se revise el contenido.
-      if (porNombre.cumple !== false) resultados.push(contenidoSinBloquear(() => diffSinPushear(values.cabeza || 'HEAD'), 'de los commits sin pushear'))
+      // Antes de un push corre solo lo que puede denegarlo. El aviso de contenido
+      // va en el check del PR, que es donde se muestra: aca el hook no lo
+      // mostraba, y esperar a ese diff (`git log -p` de todo lo que el push sube)
+      // le podia costar el plazo y, con el, el resultado que si bloquea.
+      resultados.push(evaluaSecretos(archivosSinPushear(values.cabeza || 'HEAD'), 'en commits sin pushear'))
     } else {
       resultados.push(cabeza ? evaluaSecretos(archivosAgregados(baseLocal, cabeza)) : sinCabeza('sin-secretos'))
       if (cabeza) resultados.push(contenidoSinBloquear(() => diffAgregado(baseLocal, cabeza), 'agregadas'))
