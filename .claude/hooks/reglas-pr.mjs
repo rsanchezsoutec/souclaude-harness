@@ -35,15 +35,18 @@
 // tambien los merges directos a dev/main, que en solo no pasan por ningun PR.
 //
 // Limite: el hook lee el TEXTO del comando. Ve el push a traves de envoltorios
-// (`command git push`), agrupaciones (`(git push)`), comandos anidados (`bash
-// -c`, `eval`) y lanzadores (`start`, `Start-Process`), y sigue los `cd` que
-// de verdad cambian la carpeta de lo que viene despues (no el de un subshell,
-// una tuberia o `nohup cd`); si no puede saber en que carpeta corre el push,
-// pregunta. No ve el push que hace un script (`./deploy.sh`), otro programa
-// (`make`, `python -c`), un alias configurado en git, una llamada a la API
-// (`gh api`) ni lo que va dentro de una sustitucion entre comillas dobles
-// (`"$(git push)"`). Es una red para el error honesto; la barrera de `main` es
-// la proteccion de rama en GitHub.
+// (`command git push`), agrupaciones (`(git push)`), sustituciones (`$(git
+// push)`, tambien entre comillas dobles), comandos anidados (`bash -c`,
+// `eval`), funciones definidas en el mismo comando y lanzadores (`start`,
+// `Start-Process`), y sigue los `cd` que de verdad cambian la carpeta de lo
+// que viene despues (no el de un subshell, una tuberia o `nohup cd`). Si el
+// push puede correr en una de dos carpetas, lo evalua en las dos; si no puede
+// saber en cual corre, o no alcanza a leer el comando, pregunta. No ve el push
+// que hace un script (`./deploy.sh`, `source x.sh`), otro programa (`make`,
+// `python -c`), un alias configurado en git, una llamada a la API (`gh api`)
+// ni el comando cuyo nombre sale de una variable (`$GIT push`). Es una red
+// para el error honesto; la barrera de `main` es la proteccion de rama en
+// GitHub.
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -79,76 +82,66 @@ export function segmentos(comando, shell = 'bash') {
 
 const ABRE = new Set(['(', '`('])
 const CIERRA = new Set([')', '`)'])
+// Hasta cuantas sustituciones, una dentro de otra, se leen dentro de comillas
+// dobles o del cuerpo de un heredoc.
+const SUSTITUCIONES_ANIDADAS = 24
 
 // El heredoc que abre un `<<` (`j` es la posicion que le sigue): su
 // delimitador, si lleva `-` (el cierre puede ir sangrado con tabuladores) y si
 // es `literal` -- con el delimitador entre comillas (`<<'EOF'`) el cuerpo no se
 // expande --, o null si lo que sigue no es un delimitador que se pueda leer
-// igual que bash. Leerlo distinto seria saltar un cuerpo que no es el suyo: con
-// la duda (`<<EOF!`, `<<'EO'F`) no se salta nada.
+// igual que bash (`<<EOF$x`, `<<'EO'F`). Un retorno de carro pegado al
+// delimitador (un comando con fines de linea de Windows) es parte de el, como
+// para bash: la linea que cierra tambien lo trae.
 function heredocEn(comando, j) {
   const tabs = comando[j] === '-'
   if (tabs) j++
   while (comando[j] === ' ' || comando[j] === '\t') j++
   const c = comando[j]
+  const cr = (k) => (comando[k] === '\r' && comando[k + 1] === '\n' ? '\r' : '')
   const termina = (k) => k >= comando.length || /[\s;&|()<>]/.test(comando[k])
   if (c === "'" || c === '"') {
     const fin = comando.indexOf(c, j + 1)
     const delim = fin === -1 ? '' : comando.slice(j + 1, fin)
-    return fin !== -1 && termina(fin + 1) && !/[\n\\$`]/.test(delim) ? { delim, tabs, literal: true } : null
+    return fin !== -1 && termina(fin + 1) && !/[\n\\$`]/.test(delim) ? { delim: delim + cr(fin + 1), tabs, literal: true } : null
   }
   const desde = c === '\\' ? j + 1 : j
-  const delim = comando.slice(desde).match(/^[A-Za-z_][A-Za-z0-9_.-]*/)?.[0]
-  return delim && termina(desde + delim.length) ? { delim, tabs, literal: c === '\\' } : null
+  const delim = comando.slice(desde).match(/^[A-Za-z0-9_!@%+,.:=\/^][A-Za-z0-9_!@%+,.:=\/^-]*/)?.[0]
+  return delim && termina(desde + delim.length) ? { delim: delim + cr(desde + delim.length), tabs, literal: c === '\\' } : null
 }
 
-// Los cuerpos de los heredocs pendientes, que empiezan en `desde`: donde va
-// cada uno y `fin`, la posicion del fin de linea del ultimo cierre. null si a
-// alguno le falta el cierre (no era un heredoc, o esta sin terminar: no se
-// salta nada).
-function cuerposDeHeredocs(comando, desde, heredocs) {
-  const cuerpos = []
-  let pos = desde
-  let fin = -1
-  for (const { delim, tabs, literal } of heredocs) {
-    const inicio = pos
-    fin = -1
-    while (pos <= comando.length) {
-      const salto = comando.indexOf('\n', pos)
-      const hasta = salto === -1 ? comando.length : salto
-      let linea = comando.slice(pos, hasta).replace(/\r$/, '')
-      if (tabs) linea = linea.replace(/^\t+/, '')
-      if (linea === delim) {
-        cuerpos.push({ desde: inicio, hasta: pos, literal })
-        fin = hasta
-      }
-      pos = hasta + 1
-      if (fin !== -1) break
+// Las lineas del comando, por su texto: para encontrar el cierre de un heredoc
+// sin volver a recorrer el comando cada vez (con miles de `<<X` sin cerrar, eso
+// costaba el cuadrado del largo). `conTabs` son las que traian tabuladores al
+// frente, guardadas sin ellos: valen como cierre de un `<<-`.
+function indiceDeLineas(comando) {
+  const tal = new Map()
+  const conTabs = new Map()
+  const sumar = (mapa, texto, donde) => (mapa.get(texto) ?? mapa.set(texto, []).get(texto)).push(donde)
+  for (let a = 0; a <= comando.length; ) {
+    const salto = comando.indexOf('\n', a)
+    const b = salto === -1 ? comando.length : salto
+    // Un delimitador es una palabra corta: una linea larga no lo cierra.
+    if (b - a <= 256) {
+      const texto = comando.slice(a, b)
+      const sinTabs = texto.replace(/^\t+/, '')
+      sumar(sinTabs === texto ? tal : conTabs, sinTabs, { desde: a, hasta: b })
     }
-    if (fin === -1) return null
+    a = b + 1
   }
-  return { cuerpos, fin }
+  return { tal, conTabs }
 }
 
-// El parentesis que cierra al de `abre`, antes de `limite`, o -1.
-function cierreDelParentesis(comando, abre, limite) {
-  let profundidad = 0
-  let comilla = null
-  for (let j = abre; j < limite; j++) {
-    const c = comando[j]
-    if (comilla) {
-      if (c === comilla) comilla = null
-    } else if (c === "'" || c === '"') {
-      comilla = c
-    } else if (c === '\\') {
-      j++
-    } else if (c === '(') {
-      profundidad++
-    } else if (c === ')' && --profundidad === 0) {
-      return j
-    }
+// De una lista de lineas en orden, la primera que empieza en `desde` o despues.
+function primeraDesde(lineas, desde) {
+  if (!lineas) return null
+  let [a, b] = [0, lineas.length]
+  while (a < b) {
+    const medio = (a + b) >> 1
+    if (lineas[medio].desde < desde) a = medio + 1
+    else b = medio
   }
-  return -1
+  return lineas[a] ?? null
 }
 
 // El here-string de PowerShell que abre la comilla de `i` (`@'` o `@"` al final
@@ -161,12 +154,20 @@ function finDeHereString(comando, i) {
   return cierre === -1 ? -1 : cierre + 2
 }
 
-// Lo mismo, pieza por pieza y sin descartar las vacias: el texto tal cual
+// El comando, pieza por pieza y sin descartar las vacias: el texto tal cual
 // (`desde` y `hasta` son su posicion en el comando) y `corte`, el operador que
-// la termino. Un salto de linea cuenta como `;`. `(` y `)` abren y cierran una
-// expresion, y en bash un par de backticks tambien (`\`(` y `\`)`). `shell` es
-// 'bash' (y los que se le parecen), 'powershell' o 'cmd'; en cmd un `&` suelto
-// no manda nada al fondo: separa comandos que corren uno tras otro, como `;`.
+// la termino. Un salto de linea cuenta como `;` (no el que sigue a una barra:
+// eso es una continuacion de linea, y la palabra sigue). `(` y `)` abren y
+// cierran una expresion, y en bash un par de backticks tambien (`\`(` y `\`)`).
+// `shell` es 'bash' (y los que se le parecen), 'powershell' o 'cmd'; en cmd un
+// `&` suelto no manda nada al fondo: separa comandos que corren uno tras otro,
+// como `;`.
+//
+// Una sustitucion se ejecuta tambien dentro de comillas dobles, y su contenido
+// se lee como comandos: `git commit -m "docs: usa \`git push origin main\`"`
+// hace ese push, y en `"$(cat <<'EOF' ... EOF)"` las comillas del mensaje no son
+// las del comando. La pieza que sigue al cierre de una de esas empieza dentro de
+// las comillas (`enComillas`): es texto, no un comando.
 //
 // Lo que no es un comando se descarta:
 // - Un comentario. Un `#` al comienzo de una palabra llega hasta el fin de la
@@ -176,133 +177,317 @@ function finDeHereString(comando, i) {
 // - El cuerpo de un heredoc (`<<EOF ... EOF`) y un here-string de PowerShell
 //   (`@' ... '@`): son texto. Leidos como comandos, el codigo en linea de un
 //   documento (\`git push origin main\`) contaba como un push, y un `1)` suelto
-//   cerraba el subshell que lo contenia.
-export function piezasDe(comando, shell = 'bash') {
+//   cerraba el subshell que lo contenia. Del heredoc sin comillas se leen las
+//   sustituciones, que bash ejecuta al expandirlo. Un `<<` no abre un heredoc
+//   dentro de una expresion aritmetica ni de un subindice (`$((1 << n))`), y el
+//   que queda sin cuerpo dentro de una sustitucion termina con ella.
+//
+// `sinLeerDesde`: desde donde hubo algo que no se pudo leer con certeza (un
+// heredoc sin cierre o con un delimitador raro, sustituciones demasiado
+// anidadas), o -1. Lo que sigue se leyo igual, como comandos, pero puede no ser
+// lo que el shell ejecuta.
+function leerPiezas(comando, shell = 'bash') {
   const escape = shell === 'powershell' ? '`' : '\\'
   const piezas = []
-  let desde = 0
-  let comilla = null
-  let enBackticks = false
-  let enPalabra = false
-  let heredocs = []
-  const cortar = (hasta, corte, largo = 1) => {
-    piezas.push({ texto: comando.slice(desde, hasta), desde, hasta, corte })
-    desde = hasta + largo
+  let lineas = null
+  let sinLeerDesde = -1
+  const noSeLeyo = (desde) => {
+    if (sinLeerDesde === -1 || desde < sinLeerDesde) sinLeerDesde = desde
   }
-  // Las sustituciones (`\`...\`` y `$(...)`) del texto que va de `a` a `b`: su
-  // contenido son comandos, y se suma como una expresion mas.
-  const sustituciones = (a, b) => {
-    for (let j = a; j < b; j++) {
-      const c = comando[j]
-      if (c === '\\') j++
-      const abre = c === '`' ? j : c === '$' && comando[j + 1] === '(' ? j + 1 : -1
-      if (abre === -1) continue
-      const cierra = c === '`' ? comando.indexOf('`', abre + 1) : cierreDelParentesis(comando, abre, b)
-      if (cierra === -1 || cierra >= b) continue
-      const adentro = piezasDe(comando.slice(abre + 1, cierra), shell).map((pieza) => ({ ...pieza, desde: pieza.desde + abre + 1, hasta: pieza.hasta + abre + 1 }))
-      adentro.at(-1).corte = c === '`' ? '`)' : ')'
-      piezas.push({ texto: '', desde: abre, hasta: abre, corte: c === '`' ? '`(' : '(' }, ...adentro)
-      j = cierra
+  // Leer una sustitucion que al final no cerraba cuesta su largo, y hay que
+  // volver atras: el total queda acotado.
+  let porReleer = comando.length * 4 + 10_000
+
+  // En un heredoc sin comillas, una linea que continua la anterior (que termina
+  // en una barra) no lo cierra.
+  const continuada = (desde) => {
+    let barras = 0
+    for (let k = desde - 2; k >= 0 && comando[k] === '\\'; k--) barras++
+    return barras % 2 === 1
+  }
+  const cierreDelHeredoc = (pos, { delim, tabs, literal }) => {
+    for (;;) {
+      const tal = primeraDesde(lineas.tal.get(delim), pos)
+      const sangrada = tabs ? primeraDesde(lineas.conTabs.get(delim), pos) : null
+      const cierra = tal && sangrada ? (tal.desde < sangrada.desde ? tal : sangrada) : (tal ?? sangrada)
+      if (!cierra || literal || !continuada(cierra.desde)) return cierra
+      pos = cierra.hasta + 1
     }
   }
-  for (let i = 0; i < comando.length; i++) {
-    const c = comando[i]
-    if (comilla) {
-      if (c === escape && comilla === '"' && i + 1 < comando.length) i++
-      else if (c === comilla) comilla = null
-      continue
+
+  // Lee desde `inicio` hasta `limite`, o hasta el caracter que cierra la
+  // sustitucion que se esta leyendo (`cierre`: ')' o '`'). Devuelve donde paro.
+  const leer = (inicio, cierre, limite, nivel) => {
+    let desde = inicio
+    let comilla = null // "'", '"' o '$' (las comillas de `$'...'`)
+    let enBackticks = false
+    let enPalabra = false
+    let escapado = -1
+    let sigueEnComillas = false
+    let heredocs = []
+    // Por cada `(` abierto aca: 'a' (de una expresion aritmetica), 's' (de una
+    // sustitucion: `$(`, `<(`) o 'g' (un subshell, un grupo).
+    const abiertos = []
+    let aritmeticas = 0
+    let sustituciones = 0
+    let subindices = 0
+    const cortar = (hasta, corte, largo = 1) => {
+      const pieza = { texto: comando.slice(desde, hasta), desde, hasta, corte }
+      if (sigueEnComillas) pieza.enComillas = true
+      sigueEnComillas = false
+      piezas.push(pieza)
+      desde = hasta + largo
+      subindices = 0
     }
-    const empiezaPalabra = !enPalabra
-    enPalabra = true
-    if (c === "'" || c === '"') {
-      const cierre = shell === 'powershell' ? finDeHereString(comando, i) : -1
-      if (cierre === -1) comilla = c
-      else i = cierre
-    } else if (c === escape && i + 1 < comando.length) {
-      i++
-    } else if (c === '&' && ((i > desde && /[<>]/.test(comando[i - 1])) || comando[i + 1] === '>')) {
-      // 2>&1, &>: una redireccion, no un operador.
-    } else if (c === '#' && empiezaPalabra && shell !== 'cmd') {
-      const fin = comando.indexOf('\n', i)
-      cortar(i, ';', (fin === -1 ? comando.length : fin) - i)
-      i = desde - 1
-      enPalabra = false
-    } else if (c === '<' && comando[i + 1] === '<' && shell === 'bash') {
-      // `<<<` es un here-string: una palabra mas. `<<` abre un heredoc, y su
-      // cuerpo empieza en la linea siguiente.
-      if (comando[i + 2] === '<') {
-        i += 2
-      } else {
-        const heredoc = heredocEn(comando, i + 2)
-        if (heredoc) heredocs.push(heredoc)
+    // Una sustitucion dentro de comillas dobles o del cuerpo de un heredoc, que
+    // empieza en `abre` (su `(` o su backtick): se lee aparte, con sus propias
+    // comillas. Devuelve donde cierra, o -1 si no cierra antes de `tope` (era
+    // texto) o no se la leyo.
+    const sustitucion = (abre, tope) => {
+      if (nivel >= SUSTITUCIONES_ANIDADAS || porReleer <= 0) {
+        noSeLeyo(abre)
+        return -1
+      }
+      const backtick = comando[abre] === '`'
+      const [marca, antes, estaba] = [piezas.length, desde, sigueEnComillas]
+      cortar(abre, backtick ? '`(' : '(')
+      const fin = leer(abre + 1, backtick ? '`' : ')', tope, nivel + 1)
+      if (fin >= tope) {
+        porReleer -= tope - abre
+        piezas.length = marca
+        desde = antes
+        sigueEnComillas = estaba
+        return -1
+      }
+      desde = fin + 1
+      return fin
+    }
+    // Las sustituciones del texto que va de `a` a `b` (el cuerpo de un heredoc
+    // sin comillas, un here-string expandible): lo unico que ahi se ejecuta.
+    const sustitucionesDe = (a, b) => {
+      for (let j = a; j < b; j++) {
+        const d = comando[j]
+        if (d === escape) {
+          j++
+        } else if ((d === '`' && shell === 'bash') || (d === '$' && comando[j + 1] === '(')) {
+          desde = d === '`' ? j : j + 1
+          const fin = sustitucion(desde, b)
+          if (fin !== -1) j = fin
+        }
+      }
+    }
+
+    let i = inicio
+    for (; i < limite; i++) {
+      const c = comando[i]
+      if (comilla) {
+        if (comilla === '$') {
+          // `$'...'`: la barra escapa cualquier caracter, tambien la comilla.
+          if (c === '\\' && i + 1 < limite) i++
+          else if (c === "'") comilla = null
+        } else if (c === escape && comilla === '"' && i + 1 < limite) {
+          i++
+        } else if (c === comilla) {
+          comilla = null
+        } else if (comilla === '"' && c === '`' && shell === 'bash' && (enBackticks || cierre === '`')) {
+          // Un backtick cierra la sustitucion en la que esta, haya o no comillas abiertas.
+          comilla = null
+          if (cierre === '`') break
+          cortar(i, '`)')
+          enBackticks = false
+          heredocs = heredocs.filter((heredoc) => !heredoc.enBackticks)
+        } else if (comilla === '"' && shell !== 'cmd' && ((c === '$' && comando[i + 1] === '(') || (c === '`' && shell === 'bash'))) {
+          const fin = sustitucion(c === '`' ? i : i + 1, limite)
+          if (fin !== -1) {
+            i = fin
+            sigueEnComillas = true
+          }
+        }
+        continue
+      }
+      // El backtick que cierra la sustitucion que se esta leyendo.
+      if (cierre === '`' && c === '`') break
+      const empiezaPalabra = !enPalabra
+      enPalabra = true
+      if (c === "'" || c === '"') {
+        const fin = shell === 'powershell' ? finDeHereString(comando, i) : -1
+        if (fin !== -1) {
+          // Un here-string entre comillas dobles ejecuta sus `$( )`.
+          if (c === '"') {
+            const sigue = desde
+            sustitucionesDe(i + 1, fin - 2)
+            desde = sigue
+          }
+          i = fin
+        } else {
+          comilla = c === "'" && shell === 'bash' && comando[i - 1] === '$' && i - 1 >= inicio && escapado !== i - 1 ? '$' : c
+        }
+      } else if (c === escape && i + 1 < limite) {
         i++
+        escapado = i
+        // Una continuacion de linea no empieza ni termina una palabra.
+        if (comando[i] === '\n' || (shell === 'powershell' && comando[i] === '\r' && comando[i + 1] === '\n')) {
+          if (comando[i] === '\r') i++
+          enPalabra = !empiezaPalabra
+        }
+      } else if (c === '&' && ((i > desde && /[<>]/.test(comando[i - 1])) || comando[i + 1] === '>')) {
+        // 2>&1, &>: una redireccion, no un operador.
+      } else if (c === '#' && empiezaPalabra && shell !== 'cmd') {
+        let fin = comando.indexOf('\n', i)
+        if (fin === -1 || fin > limite) fin = limite
+        // Dentro de unos backticks, el que los cierra tambien termina el comentario.
+        const backtick = shell === 'bash' && (cierre === '`' || enBackticks) ? comando.indexOf('`', i) : -1
+        if (backtick !== -1 && backtick < fin) fin = backtick
+        cortar(i, ';', fin - i)
+        i = desde - 1
+        enPalabra = false
+      } else if (c === '<' && comando[i + 1] === '<' && shell === 'bash') {
+        // `<<<` es un here-string: una palabra mas. `<<` abre un heredoc, y su
+        // cuerpo empieza en la linea siguiente.
+        if (comando[i + 2] === '<') {
+          i += 2
+        } else {
+          if (!aritmeticas && !subindices) {
+            const heredoc = heredocEn(comando, i + 2)
+            if (heredoc) heredocs.push({ ...heredoc, sustituciones, enBackticks })
+            else noSeLeyo(i)
+          }
+          i++
+        }
+      } else if (c === '`' && shell === 'bash') {
+        cortar(i, enBackticks ? '`)' : '`(')
+        // Lo que sigue al backtick que abre es el comienzo de un comando; lo que
+        // sigue al que cierra (`x=\`cmd\`#y`) es parte de la misma palabra.
+        enPalabra = enBackticks
+        enBackticks = !enBackticks
+        if (!enBackticks) heredocs = heredocs.filter((heredoc) => !heredoc.enBackticks)
+      } else if (c === '(') {
+        const previo = comando[i - 1]
+        const tipo = comando[i + 1] === '(' || (previo === '(' && abiertos.at(-1) === 'a') ? 'a' : previo === '$' || previo === '<' || previo === '>' ? 's' : 'g'
+        abiertos.push(tipo)
+        if (tipo === 'a') aritmeticas++
+        else if (tipo === 's') sustituciones++
+        cortar(i, c)
+        enPalabra = false
+      } else if (c === ')') {
+        // El parentesis que cierra la sustitucion que se esta leyendo.
+        if (cierre === ')' && !abiertos.length) break
+        const tipo = abiertos.pop()
+        if (tipo === 'a') aritmeticas--
+        if (tipo === 's') {
+          // El heredoc que quedo sin cuerpo dentro de la sustitucion termina con
+          // ella: `echo $(cat <<EOF)` no toma las lineas que siguen.
+          sustituciones--
+          heredocs = heredocs.filter((heredoc) => heredoc.sustituciones <= sustituciones)
+        }
+        cortar(i, c)
+        enPalabra = true
+      } else if (c === '[' && i > inicio && /[A-Za-z0-9_$]/.test(comando[i - 1])) {
+        subindices++
+      } else if (c === ']' && subindices) {
+        subindices--
+      } else if (c === ';' || c === '\n' || c === '\r') {
+        cortar(i, ';')
+        enPalabra = false
+        if (c === '\n' && heredocs.length) {
+          lineas ??= indiceDeLineas(comando)
+          let pos = i + 1
+          const cuerpos = []
+          for (const heredoc of heredocs) {
+            const cierra = cierreDelHeredoc(pos, heredoc)
+            if (!cierra || cierra.hasta > limite) {
+              pos = -1
+              break
+            }
+            cuerpos.push({ a: pos, b: cierra.desde, literal: heredoc.literal })
+            pos = cierra.hasta + 1
+          }
+          heredocs = []
+          if (pos === -1) {
+            // Sin cierre: no se salta nada.
+            noSeLeyo(i)
+          } else {
+            // El cuerpo es texto, salvo lo que bash ejecuta al expandirlo: las
+            // sustituciones de un heredoc sin comillas.
+            for (const { a, b, literal } of cuerpos) if (!literal) sustitucionesDe(a, b)
+            desde = pos - 1
+            i = pos - 2
+          }
+        }
+      } else if (c === '&' || c === '|') {
+        // `&&` y `||` son un solo operador; `|&` es una tuberia (con stderr).
+        const largo = comando[i + 1] === c || (c === '|' && comando[i + 1] === '&') ? 2 : 1
+        const corte = comando[i + 1] === c ? c + c : c === '&' && shell === 'cmd' ? ';' : c
+        cortar(i, corte, largo)
+        i += largo - 1
+        enPalabra = false
+      } else if (/\s/.test(c)) {
+        enPalabra = false
       }
-    } else if (c === '`' && shell === 'bash') {
-      cortar(i, enBackticks ? '`)' : '`(')
-      // Lo que sigue al backtick que abre es el comienzo de un comando; lo que
-      // sigue al que cierra (`x=\`cmd\`#y`) es parte de la misma palabra.
-      enPalabra = enBackticks
-      enBackticks = !enBackticks
-    } else if (c === '(' || c === ')') {
-      cortar(i, c)
-      enPalabra = c === ')'
-    } else if (c === ';' || c === '\n' || c === '\r') {
-      cortar(i, ';')
-      enPalabra = false
-      const cuerpo = c === '\n' && heredocs.length ? cuerposDeHeredocs(comando, i + 1, heredocs) : null
-      if (c === '\n') heredocs = []
-      if (cuerpo) {
-        // El cuerpo es texto, salvo lo que bash ejecuta al expandirlo: las
-        // sustituciones de un heredoc sin comillas.
-        for (const { desde: a, hasta: b, literal } of cuerpo.cuerpos) if (!literal) sustituciones(a, b)
-        desde = cuerpo.fin
-        i = cuerpo.fin - 1
-      }
-    } else if (c === '&' || c === '|') {
-      // `&&` y `||` son un solo operador; `|&` es una tuberia (con stderr).
-      const largo = comando[i + 1] === c || (c === '|' && comando[i + 1] === '&') ? 2 : 1
-      const corte = comando[i + 1] === c ? c + c : c === '&' && shell === 'cmd' ? ';' : c
-      cortar(i, corte, largo)
-      i += largo - 1
-      enPalabra = false
-    } else if (/\s/.test(c)) {
-      enPalabra = false
     }
+    const fin = Math.min(i, limite)
+    cortar(fin, fin < limite ? (cierre === '`' ? '`)' : ')') : '')
+    return fin
   }
-  cortar(comando.length, '')
-  return piezas
+
+  leer(0, null, comando.length, 0)
+  return { piezas, sinLeerDesde }
+}
+
+export function piezasDe(comando, shell = 'bash') {
+  return leerPiezas(comando, shell).piezas
 }
 
 // Palabras de un segmento, sin comillas. Descarta las redirecciones (2>&1,
 // > archivo) y las asignaciones iniciales (VAR=valor git push). Una expresion
 // entre parentesis o entre backticks (`$(cat rama.txt)`) queda entera dentro de
-// su palabra: sus espacios no separan.
+// su palabra: sus espacios no separan. Una barra seguida de un salto de linea
+// (en PowerShell, un backtick) es una continuacion de linea: no deja nada, ni
+// siquiera en medio de una palabra (`git pu\<salto>sh` es `git push`).
 export function palabras(segmento, shell = 'bash') {
   const escape = shell === 'powershell' ? '`' : '\\'
   const crudas = []
   let actual = ''
   let hay = false
-  let comilla = null
+  let comilla = null // "'", '"' o '$' (las comillas de `$'...'`)
   let profundidad = 0
   let enBackticks = false
+  let trasEscape = -1 // el largo de `actual` justo despues de un caracter escapado
   for (let i = 0; i < segmento.length; i++) {
     const c = segmento[i]
     if (comilla) {
       // En bash, dentro de comillas dobles la barra solo escapa " \ $ ` y el
       // salto de linea: "C:\Users\x" queda tal cual. En PowerShell, el
-      // backtick escapa cualquier caracter.
+      // backtick escapa cualquier caracter. En `$'...'` la barra escapa
+      // cualquiera, tambien la comilla.
       const escapado = segmento[i + 1] ?? ''
-      if (c === comilla) comilla = null
-      else if (c === escape && comilla === '"' && (shell === 'powershell' ? escapado !== '' : /["\\$`\n]/.test(escapado))) actual += segmento[++i]
-      else actual += c
+      if (comilla === '$') {
+        if (c === '\\' && escapado !== '') actual += segmento[++i]
+        else if (c === "'") comilla = null
+        else actual += c
+      } else if (c === comilla) comilla = null
+      else if (c === escape && comilla === '"' && (shell === 'powershell' ? escapado !== '' : /["\\$`\n]/.test(escapado))) {
+        if (segmento[++i] !== '\n') actual += segmento[i]
+      } else actual += c
       continue
     }
     if (c === "'" || c === '"') {
-      comilla = c
+      // `$'main'` es `main`: el `$` es parte de las comillas.
+      if (c === "'" && shell === 'bash' && actual.endsWith('$') && trasEscape !== actual.length) {
+        comilla = '$'
+        actual = actual.slice(0, -1)
+      } else {
+        comilla = c
+      }
       hay = true
     } else if (c === escape && i + 1 < segmento.length) {
-      actual += segmento[++i]
-      hay = true
+      i++
+      if (shell === 'powershell' && segmento[i] === '\r' && segmento[i + 1] === '\n') i++
+      if (segmento[i] !== '\n') {
+        actual += segmento[i]
+        hay = true
+        trasEscape = actual.length
+      }
     } else if (/\s/.test(c) && profundidad === 0 && !enBackticks) {
       if (hay) crudas.push(actual)
       actual = ''
@@ -373,10 +558,18 @@ const PROFUNDIDAD_MAXIMA = 4
 
 // El comando que un segmento ejecuta de verdad, sin lo que lo envuelve.
 // `viaXargs`: sus argumentos llegan por stdin y no se pueden leer del texto.
-// `envoltorios`: los que se le quitaron, en orden.
+// `envoltorios`: los que se le quitaron, en orden. `dudoso`: se le quito una
+// asignacion o una palabra de control que seguia a un envoltorio que no las
+// admite (`builtin X=1 cd x` busca un builtin llamado `X=1`): puede que ese
+// comando no llegue a correr.
+const ASIGNACION = /^[A-Za-z_][A-Za-z0-9_]*=/
+const ADMITEN_ASIGNACIONES = new Set(['env', 'sudo', 'doas', 'time'])
+
 export function comandoEfectivo(palabrasDelSegmento) {
   let p = [...palabrasDelSegmento]
   let viaXargs = false
+  let dudoso = false
+  let negado = false
   const envoltorios = []
   // `git push` entre backticks, o {git push} pegado a las llaves (PowerShell).
   const abre = p[0]?.match(/^[`{]+/)?.[0]
@@ -385,13 +578,22 @@ export function comandoEfectivo(palabrasDelSegmento) {
     p[p.length - 1] = p[p.length - 1].replace(/[`};]+$/, '')
     p = p.filter(Boolean)
   }
-  for (let vueltas = 0; vueltas < 12 && p.length; vueltas++) {
-    if (PALABRAS_DE_CONTROL.has(p[0])) {
+  while (p.length) {
+    // `then GIT_TRACE=1 git push`, `{ X=1 git push; }`: las asignaciones que
+    // siguen a una palabra de control son las del comando. Tras un envoltorio
+    // que no es `time`, una palabra de control es el nombre de un programa
+    // (`builtin ! cd x` busca un builtin llamado `!`).
+    if (PALABRAS_DE_CONTROL.has(p[0]) || ASIGNACION.test(p[0])) {
+      if (envoltorios.some((envoltorio) => envoltorio !== 'time')) dudoso = true
+      if (p[0] === '!') negado = true
       p.shift()
       continue
     }
     const nombre = p[0].replace(/^.*[\\/]/, '').replace(/\.exe$/i, '').toLowerCase()
     if (!ENVOLTORIOS.has(nombre)) break
+    // `! time cd x`: tras un `!`, que `time` sea la palabra del shell o el
+    // programa (que corre el `cd` en otro proceso) depende del shell.
+    if (nombre === 'time' && negado) dudoso = true
     if (nombre === 'xargs') viaXargs = true
     // Escrito con su ruta (`/usr/bin/time`) es un programa aparte, no el del shell.
     envoltorios.push(/[\\/]/.test(p[0]) ? p[0] : nombre)
@@ -399,9 +601,12 @@ export function comandoEfectivo(palabrasDelSegmento) {
     // `command -v git` solo dice donde esta git: no ejecuta nada.
     if (nombre === 'command' && /^-[vV]$/.test(p[0] ?? '')) return { p: [], viaXargs, envoltorios }
     // Opciones del envoltorio, asignaciones de env y duraciones de timeout/nice.
-    while (p.length && (p[0].startsWith('-') || /^[A-Za-z_][A-Za-z0-9_]*=/.test(p[0]) || /^\d+(\.\d+)?[smhd]?$/.test(p[0]))) p.shift()
+    while (p.length && (p[0].startsWith('-') || ASIGNACION.test(p[0]) || /^\d+(\.\d+)?[smhd]?$/.test(p[0]))) {
+      if (ASIGNACION.test(p[0]) && !ADMITEN_ASIGNACIONES.has(nombre)) dudoso = true
+      p.shift()
+    }
   }
-  return { p, viaXargs, envoltorios }
+  return dudoso ? { p, viaXargs, envoltorios, dudoso } : { p, viaXargs, envoltorios }
 }
 
 // Un comando escrito dentro de otro: `bash -c "..."`, `eval "..."`,
@@ -466,9 +671,23 @@ function esCarpeta(ruta) {
   }
 }
 
-function rutaExpandida(actual, destino) {
+// Una carpeta que todavia no existe (`mkdir build; cd build`) es del repo en el
+// que se la va a crear: su ancestro mas cercano que exista.
+function laQueExiste(ruta) {
+  while (!esCarpeta(ruta) && path.dirname(ruta) !== ruta) ruta = path.dirname(ruta)
+  return ruta
+}
+
+// La carpeta es una de las que el mismo comando crea con `mkdir` (o queda
+// camino a una: `mkdir -p a/b` crea tambien `a`).
+const seCrea = (creadas, ruta) => creadas != null && [...creadas].some((creada) => creada === ruta || creada.startsWith(ruta + path.sep))
+const MAX_CARPETAS_CREADAS = 256
+
+// `$PWD` y `$(pwd)` son la carpeta en la que se este, sea cual sea: quedan como
+// `.`, relativos a ella (con una duda de por medio, `cd "$(pwd)"` no la despeja).
+function rutaExpandida(destino) {
   if (destino === '~' || /^~[\\/]/.test(destino)) return path.join(os.homedir(), destino.slice(1))
-  return rutaNativa(destino.replace(HOGAR, () => os.homedir()).replace(AQUI, () => actual))
+  return rutaNativa(destino.replace(HOGAR, () => os.homedir()).replace(AQUI, () => '.'))
 }
 
 const dudaDeCarpeta = (motivo) => `no se sabe en que carpeta corre (${motivo})`
@@ -494,10 +713,16 @@ const PILA_MAXIMA = 256
 // el motivo, si eso no se sabe con certeza (`duda`), y entonces la otra carpeta
 // en la que puede estar, si se conoce (`alternativa`); el lugar anterior, para
 // `cd -`; y los que apilo `pushd`. Un lugar es { carpeta, duda, alternativa }.
-// `cambios` cuenta las veces que cambio.
+// `cambios` cuenta las veces que cambio. Con `duda` y `alternativa`, la carpeta
+// es una de las dos; con `duda` y sin `alternativa`, puede ser cualquiera.
+// `imposible`: se llego hasta aca solo si no fallo un `cd` que falla seguro.
 const lugarDe = (e) => ({ carpeta: e.carpeta, duda: e.duda, alternativa: e.alternativa })
 const copiaDe = (e) => ({ ...e, pila: [...e.pila] })
-const mismoLugar = (a, b) => a.carpeta === b.carpeta && a.duda === b.duda && a.pila.length === b.pila.length
+// El mismo lugar (o ninguno, los dos): la misma carpeta, con la misma duda.
+const mismoLugar = (a, b) => a === b || (a != null && b != null && a.carpeta === b.carpeta && a.duda === b.duda && (a.alternativa ?? null) === (b.alternativa ?? null))
+const mismaPila = (a, b) => a.length === b.length && a.every((lugar, i) => mismoLugar(lugar, b[i]))
+// El mismo estado entero: tambien adonde llevan `cd -` y `popd`.
+const mismoEstado = (a, b) => mismoLugar(a, b) && mismoLugar(a.anterior, b.anterior) && mismaPila(a.pila, b.pila)
 // Deja `e` como `otro` sin cambiar de objeto: un `eval` lo comparte con quien lo llama.
 const volverA = (e, otro) => Object.assign(e, otro, { pila: [...otro.pila] })
 
@@ -525,19 +750,41 @@ function cambiarDeCarpeta(e, p, contexto) {
   const nombre = p[0]
   const corre = correAca(contexto)
   if (corre === 'no') return false
+  // Con una duda anterior, una duda mas deja mas de dos carpetas posibles.
+  const yaDudaba = e.duda != null
   const dudar = (motivo) => {
     e.duda = dudaDeCarpeta(motivo)
     e.alternativa = null
     e.cambios++
     return true
   }
-  if (corre === 'depende') {
-    // Las dos carpetas posibles se conocen: donde se esta, y adonde lleva si corre aca.
+  // Tras un `cd` que pudo correr o no, `cd -` vuelve a donde se estaba (si
+  // corrio) o a la carpeta anterior de antes (si no). Sin una anterior, o si es
+  // la misma, es donde se estaba; si no, una de las dos.
+  const [aca, anteriorDeAntes, pilaDeAntes] = [lugarDe(e), e.anterior, e.pila.length]
+  const anteriorIncierta = () =>
+    anteriorDeAntes == null || mismoLugar(anteriorDeAntes, aca) ? aca : { carpeta: aca.carpeta, duda: e.duda, alternativa: aca.duda || anteriorDeAntes.duda || aca.carpeta === anteriorDeAntes.carpeta ? null : anteriorDeAntes.carpeta }
+  // Y si lo que pudo no correr es un `pushd` sobre una pila con algo, tampoco se sabe que saca `popd`.
+  const pilaIncierta = () => {
+    if (pilaDeAntes) e.pila = e.pila.map(() => ({ carpeta: aca.carpeta, duda: e.duda, alternativa: null }))
+  }
+  if (corre === 'depende' || contexto.quiza) {
+    // Puede correr aca o no: por el shell, o porque llega solo si fallo lo
+    // anterior (`a || cd x`). Las dos carpetas posibles se conocen: donde se
+    // esta, y adonde lleva si corre.
     const siCorre = copiaDe(e)
-    cambiarDeCarpeta(siCorre, p, { ...contexto, antes: ';', envoltorios: [] })
-    e.anterior = lugarDe(e)
-    dudar(`que \`${contexto.envoltorios.includes('command') ? 'command ' : ''}${nombre}\` cambie o no la carpeta depende del shell${contexto.antes === '|' ? ': cierra una tuberia' : ''}`)
-    e.alternativa = siCorre.duda ? null : siCorre.carpeta
+    cambiarDeCarpeta(siCorre, p, { ...contexto, antes: ';', envoltorios: [], quiza: false })
+    if (mismoEstado(siCorre, e)) return false
+    const mismaPilaSiCorre = mismaPila(siCorre.pila, e.pila)
+    dudar(
+      corre === 'depende'
+        ? `que \`${contexto.envoltorios.includes('command') ? 'command ' : ''}${nombre}\` cambie o no la carpeta depende del shell${contexto.antes === '|' ? ': cierra una tuberia' : ''}`
+        : `\`${p.join(' ')}\` corre solo si falla el comando anterior`,
+    )
+    // Tampoco se sabe del todo adonde llevan ahora `cd -` y `popd`.
+    e.anterior = anteriorIncierta()
+    if (!mismaPilaSiCorre) e.pila = Array.from({ length: Math.max(e.pila.length, siCorre.pila.length) }, () => (pilaDeAntes ? lugarDe(e) : aca))
+    e.alternativa = yaDudaba || siCorre.duda ? null : siCorre.carpeta
     return true
   }
   const ir = (lugar) => {
@@ -552,11 +799,22 @@ function cambiarDeCarpeta(e, p, contexto) {
   const args = p.slice(1).filter((x) => !(contexto.shell === 'cmd' && /^\/d$/i.test(x)))
   const apila = ES_PUSHD.test(nombre)
   if (apila && args.some((x) => /^[+-]\d+$/.test(x))) return dudar(`\`${p.join(' ')}\` rota una pila de carpetas que este comando no deja ver`)
+  // `cd a b`: bash da error (o ignora `b`, segun la version) y zsh reemplaza `a`
+  // por `b` en la ruta actual.
+  if (args.filter((x) => x === '-' || !x.startsWith('-')).length > 1) return dudar(`\`${p.join(' ')}\` tiene mas de un destino, y que hace con eso depende del shell`)
   const destino = args.find((x) => !x.startsWith('-'))
   if (destino == null) {
     if (apila) {
-      // `pushd` a secas intercambia la carpeta actual con la ultima apilada.
-      if (!e.pila.length) return false
+      // `pushd` a secas intercambia la carpeta actual con la ultima apilada. Con
+      // la pila vacia, bash da error y zsh va a la carpeta personal.
+      if (!e.pila.length) {
+        if (contexto.shell !== 'bash') return false
+        dudar('que hace `pushd` a secas con la pila vacia depende del shell')
+        e.anterior = anteriorIncierta()
+        e.pila = [aca]
+        e.alternativa = yaDudaba ? null : os.homedir()
+        return true
+      }
       const tope = e.pila.pop()
       e.pila.push(lugarDe(e))
       return ir(tope)
@@ -564,7 +822,7 @@ function cambiarDeCarpeta(e, p, contexto) {
     if (!args.includes('-')) return false
     return e.anterior ? ir(e.anterior) : dudar(`\`${nombre} -\` vuelve a una carpeta que este comando no nombra`)
   }
-  const expandida = rutaExpandida(e.carpeta, destino)
+  const expandida = rutaExpandida(destino)
   const ruta = path.resolve(e.carpeta, expandida)
   const dinamica = DINAMICO_EN_RUTA.test(expandida) && !esCarpeta(ruta)
   if ((!dinamica && ruta.length > RUTA_MAXIMA) || (apila && e.pila.length >= PILA_MAXIMA)) {
@@ -572,29 +830,40 @@ function cambiarDeCarpeta(e, p, contexto) {
   }
   if (apila) e.pila.push(lugarDe(e))
   if (dinamica) {
-    e.anterior = lugarDe(e)
     dudar(`el destino de \`${nombre} ${destino}\` se resuelve recien al ejecutar`)
-    e.alternativa = enElProyecto(destino)
+    e.anterior = anteriorIncierta()
+    if (apila) pilaIncierta()
+    e.alternativa = yaDudaba ? null : enElProyecto(destino)
     return true
   }
-  // La carpeta no existe ahora. Si nada la crea antes en el mismo comando, este
-  // `cd` falla y lo que le sigue corre donde se estaba: `cd ../vualt; git add -A;
-  // git commit; git push`, con la ruta mal escrita, hace todo eso en el proyecto.
-  // Tras un `&&` no hay duda (si falla, lo que sigue no corre), ni tras un
-  // `|| exit 1`. En Windows, las rutas propias de Git Bash (`/tmp`) no se
-  // pueden comprobar.
+  // La carpeta no existe ahora, y el comando no la crea con un `mkdir`. Este
+  // `cd` puede fallar, y entonces lo que le sigue corre donde se estaba: `cd
+  // ../vualt; git add -A; git commit; git push`, con la ruta mal escrita, hace
+  // todo eso en el proyecto. Si no falla es porque algo que corre antes la crea
+  // (un clon, un worktree, un script), y de eso no se sabe que repo deja ahi: la
+  // otra carpeta posible no se conoce. En Windows, las rutas propias de Git
+  // Bash (`/tmp`) no se pueden comprobar.
   const comprobable = !(process.platform === 'win32' && /^[\\/](?![\\/])/.test(expandida))
+  const falta = comprobable && !esCarpeta(ruta) && !seCrea(contexto.creadas, ruta)
   const siFallaNoSigue = contexto.despues === '&&' || (contexto.despues === '||' && contexto.saleSiFalla)
-  if (comprobable && !esCarpeta(ruta) && !siFallaNoSigue) {
-    e.anterior = lugarDe(e)
+  if (falta && !siFallaNoSigue) {
     dudar(`\`${nombre} ${destino}\` puede fallar: esa carpeta no existe ahora`)
-    e.alternativa = ruta
+    e.anterior = anteriorIncierta()
+    if (apila) pilaIncierta()
     return true
   }
+  // Tras un `&&` o un `|| exit 1`, si falla no corre lo que sigue. Si antes no
+  // corrio nada que pudiera crearla, falla seguro (`imposible`: lo que sigue no
+  // llega a correr). Si corrio algo, se sabe donde se esta pero no que repo hay
+  // ahi: eso se resuelve al evaluar el push. (Con una duda anterior, de una ruta
+  // relativa tampoco se sabe si existe.)
+  if (falta && !contexto.corrieron && !(yaDudaba && !path.isAbsolute(expandida))) e.imposible = true
   // Una ruta absoluta deja en claro donde se esta; una relativa hereda la duda
-  // (y mueve igual la carpeta alternativa).
+  // y mueve igual la carpeta alternativa -- si desde ahi existe: si no, alla
+  // ese `cd` falla y se queda donde estaba.
   if (path.isAbsolute(expandida)) return ir({ carpeta: ruta, duda: null })
-  return ir({ carpeta: ruta, duda: e.duda, alternativa: e.alternativa && path.resolve(e.alternativa, expandida) })
+  const otra = e.alternativa && path.resolve(e.alternativa, expandida)
+  return ir({ carpeta: ruta, duda: e.duda, alternativa: otra && (esCarpeta(otra) ? otra : e.alternativa) })
 }
 
 // Lo que sigue a un `||` (un comando, o unas llaves enteras) termina con `exit`
@@ -613,13 +882,14 @@ function saleElQueSigue(piezas, desde) {
 }
 
 // Un `cd` literal a una carpeta que ahora no existe: puede fallar.
-function puedeFallar(e, p, shell) {
+function puedeFallar(e, p, shell, creadas) {
   if (!ES_CD.test(p[0]) && !ES_PUSHD.test(p[0])) return false
   const destino = p.slice(1).find((x) => !x.startsWith('-') && !(shell === 'cmd' && /^\/d$/i.test(x)))
   if (destino == null) return false
-  const expandida = rutaExpandida(e.carpeta, destino)
+  const expandida = rutaExpandida(destino)
   if (process.platform === 'win32' && /^[\\/](?![\\/])/.test(expandida)) return false
-  return !DINAMICO_EN_RUTA.test(expandida) && !esCarpeta(path.resolve(e.carpeta, expandida))
+  const ruta = path.resolve(e.carpeta, expandida)
+  return !DINAMICO_EN_RUTA.test(expandida) && !esCarpeta(ruta) && !seCrea(creadas, ruta)
 }
 
 // `$(git branch --show-current)` y sus equivalentes SI se pueden leer del
@@ -648,18 +918,49 @@ const EXPRESION_SIN_LEER = '$(...)'
 const ABRE_BLOQUE = new Set(['if', 'while', 'until', 'for', 'select', 'case'])
 const CIERRA_BLOQUE = new Set(['fi', 'done', 'esac'])
 const SIGUE_BLOQUE = new Set(['then', 'do', 'else', 'elif', '!', '{', '}'])
+// A estas las sigue un comando (`if case ...`, `while ! { ...`); a `for`,
+// `select` y `case`, un nombre.
+const SIGUE_UN_COMANDO = new Set(['if', 'while', 'until'])
+const BUCLES = new Set(['for', 'while', 'until', 'select'])
 
 // Las palabras de estructura con las que empieza una pieza (`then`, `fi`,
-// `{`...), hasta la primera que abre un bloque o que ya es un comando.
-function estructuraDe(crudas) {
-  const salida = []
-  for (const palabra of crudas) {
-    if (ABRE_BLOQUE.has(palabra)) return [...salida, palabra]
-    if (!CIERRA_BLOQUE.has(palabra) && !SIGUE_BLOQUE.has(palabra)) break
-    salida.push(palabra)
+// `{`, `if case`...), hasta la primera que ya es un comando o un nombre, y
+// cuantas palabras ocupan (`largo`). `time` puede ir delante de cualquier
+// comando, tambien de un bloque (`time if ...`): no cuenta, pero no corta.
+function cabezaDe(crudas) {
+  const estructura = []
+  let largo = 0
+  for (; largo < crudas.length; largo++) {
+    const palabra = crudas[largo]
+    if (palabra === 'time' || (palabra === '-p' && crudas[largo - 1] === 'time')) continue
+    if (ABRE_BLOQUE.has(palabra)) {
+      estructura.push(palabra)
+      if (!SIGUE_UN_COMANDO.has(palabra)) {
+        largo++
+        break
+      }
+    } else if (CIERRA_BLOQUE.has(palabra) || SIGUE_BLOQUE.has(palabra)) {
+      estructura.push(palabra)
+    } else {
+      break
+    }
   }
-  return salida
+  return { estructura, largo }
 }
+const estructuraDe = (crudas) => cabezaDe(crudas).estructura
+
+// Una pieza hecha solo de palabras de estructura (o vacia): lo que sigue a su
+// expresion -- `if (test) then`, `{ (cmd) }` -- todavia puede ser estructura.
+// Tras cualquier otra cosa (`echo $(date) case`), lo que sigue son argumentos.
+const soloEstructura = (pieza) => !pieza.texto.trim() || (pieza.crudas.length > 0 && pieza.funcion == null && cabezaDe(pieza.crudas).largo === pieza.crudas.length)
+
+// `x=(a b)`, `arr+=(c)`, `local x=(...)`: el literal de un arreglo. Lo de
+// adentro son datos, no comandos.
+const ABRE_UN_ARREGLO = /(^|\s)[A-Za-z_][A-Za-z0-9_]*\+?=$/
+
+// Una funcion definida en el mismo comando que usa sus argumentos (`retry() {
+// "$@" || "$@"; }`): lo que se le pasa puede ser un comando.
+const USA_SUS_ARGUMENTOS = /\$(\{?[@*1-9])/
 
 // Cuantos bloques de script de PowerShell abre y cierra una pieza. `${var}` y
 // `@{...}` no son bloques.
@@ -672,49 +973,128 @@ function llavesDe(crudas) {
 // envuelve), la `carpeta` en la que corre y `duda`, el motivo cuando esa
 // carpeta no se puede saber con certeza (con `alternativa`, la otra carpeta
 // posible, si se conoce). Mira a traves de envoltorios (`command git push`),
-// agrupaciones (`(git push)`, `if ...; then git push; fi`) y comandos anidados
-// (`bash -c`, `eval`), y sigue los `cd`, `pushd` y `popd`.
+// agrupaciones (`(git push)`, `if ...; then git push; fi`), comandos anidados
+// (`bash -c`, `eval`) y funciones definidas en el mismo comando, y sigue los
+// `cd`, `pushd` y `popd`.
 //
 // La carpeta la mueve solo el `cd` que llega a lo que viene despues:
 // - En bash, el de un subshell o una sustitucion -- `(cd x)`, `$(cd x)` --
 //   termina con ella: al cerrar el parentesis vuelve la carpeta de antes. En
 //   PowerShell y en cmd un parentesis no abre otro proceso, y ese `cd` queda.
-// - El que puede no haber corrido -- el de un `if`, un bucle, un `case` o el
-//   cuerpo de una funcion, o el que sigue a un `&&` -- vale para lo que lo
-//   acompania adentro; al salir ya no se sabe donde se esta, y queda en duda.
-function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, pasos = null } = {}) {
+//   Lo mismo el de una lista mandada al fondo (`a && cd x &`).
+// - El que puede no haber corrido -- el de un `if`, un bucle o un `case`, o el
+//   que sigue a un `&&` o a un `||` -- vale para lo que lo acompania adentro;
+//   al salir ya no se sabe donde se esta, y queda en duda.
+// - El del cuerpo de una funcion no mueve nada al definirla: corre cuando se
+//   la llama, y ahi se vuelve a leer el cuerpo.
+//
+// `lectura` es lo que comparten las lecturas anidadas de un mismo comando: el
+// presupuesto de piezas (`quedan`), si ya se aviso de algo que no se pudo leer,
+// las funciones definidas, las carpetas que crea con `mkdir` y cuantos
+// comandos corrieron ya.
+const nuevaLectura = () => ({ quedan: null, avisado: false, funciones: new Map(), definidas: [], enCurso: new Set(), creadas: new Set(), corrieron: 0 })
+
+function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, lectura = null } = {}) {
   const texto = comando.replace(SUSTITUCION_DE_LA_RAMA_ACTUAL, 'HEAD').replace(SUSTITUCION_DE_LA_RAIZ_DEL_REPO, '.')
-  const piezas = piezasDe(texto, shell)
+  const { piezas, sinLeerDesde } = leerPiezas(texto, shell)
   // Un comando anidado se vuelve a leer en cada nivel (`eval (eval (...`): el
   // total de piezas leidas queda acotado, y lo que no se alcanza a leer se
   // pregunta. Un hook que se pasa de su plazo no frena nada.
-  pasos ??= { quedan: piezas.length * 4 + 5_000 }
-  pasos.quedan -= piezas.length
+  lectura ??= nuevaLectura()
+  lectura.quedan ??= piezas.length * 4 + 5_000
+  lectura.quedan -= piezas.length
 
-  // Las palabras de cada pieza y, para cada pieza que abre una expresion, la
-  // pieza en la que cierra. El `)` de un patron de `case` no cierra nada: tomado
-  // por el de un subshell, deshacia su `cd` antes de tiempo.
+  // Primera pasada: las palabras de cada pieza y, para cada pieza que abre una
+  // expresion, la pieza en la que cierra.
+  // - El `)` de un patron de `case` no cierra nada: tomado por el de un
+  //   subshell, deshacia su `cd` antes de tiempo.
+  // - `esDato`: la pieza esta dentro del literal de un arreglo. `esArgumento`:
+  //   sigue al cierre de una expresion que era parte de los argumentos de un
+  //   comando, o empieza dentro de unas comillas. En ninguna de las dos una
+  //   palabra como `case` o `}` es estructura.
+  // - `function f` no es parte del comando de la pieza: es el encabezado de una
+  //   definicion (`trasFunction`: cuantas palabras de estructura lleva delante).
+  // - `defineFuncion`: los parentesis vacios tras un nombre son los de una
+  //   definicion (`git() { ... }`), no una expresion: lo que sigue es su cuerpo.
   const cierreDe = new Map()
   const abiertas = []
   const cases = []
+  let sigueArgumento = false
   piezas.forEach((pieza, k) => {
-    pieza.crudas = pieza.texto.trim() ? palabras(pieza.texto, shell) : []
-    if (shell === 'bash') {
-      for (const palabra of estructuraDe(pieza.crudas)) {
-        if (palabra === 'case') cases.push(abiertas.length)
+    let crudas = pieza.texto.trim() ? palabras((pieza.enComillas ? '"' : '') + pieza.texto, shell) : []
+    pieza.esDato = abiertas.at(-1)?.datos === true
+    pieza.esArgumento = sigueArgumento || pieza.enComillas === true
+    sigueArgumento = false
+    if (shell !== 'cmd' && !pieza.esDato && !pieza.esArgumento) {
+      const largo = shell === 'bash' ? cabezaDe(crudas).largo : 0
+      if (crudas.length > largo + 1 && (crudas[largo] === 'function' || (crudas[largo] === 'filter' && shell === 'powershell'))) {
+        pieza.funcion = crudas[largo + 1]
+        pieza.trasFunction = largo
+        crudas = [...crudas.slice(0, largo), ...crudas.slice(largo + 2)]
+      }
+    }
+    pieza.crudas = crudas
+    if (shell === 'bash' && !pieza.esDato && !pieza.esArgumento) {
+      for (const palabra of estructuraDe(crudas)) {
+        // `case x in esac` abre y cierra en la misma pieza.
+        if (palabra === 'case' && !(crudas.at(-1) === 'esac' && crudas.at(-2) === 'in')) cases.push(abiertas.length)
         else if (palabra === 'esac') cases.pop()
       }
     }
-    if (ABRE.has(pieza.corte)) abiertas.push(k)
-    else if (pieza.corte === ')' && cases.length && abiertas.length === cases.at(-1)) pieza.corte = ';'
-    else if (CIERRA.has(pieza.corte) && abiertas.length) cierreDe.set(abiertas.pop(), k)
+    if (ABRE.has(pieza.corte)) {
+      abiertas.push({ k, datos: shell === 'bash' && pieza.corte === '(' && ABRE_UN_ARREGLO.test(pieza.texto) })
+    } else if (pieza.corte === ')' && cases.length && abiertas.length === cases.at(-1)) {
+      pieza.corte = ';'
+    } else if (CIERRA.has(pieza.corte) && abiertas.length) {
+      const a = abiertas.pop().k
+      const abre = piezas[a]
+      cierreDe.set(a, k)
+      if (abre.corte === '(' && k === a + 1 && !pieza.texto.trim() && !abre.esDato && !abre.esArgumento) {
+        const efectivo = comandoEfectivo(abre.crudas)
+        // `f g() { ... }` define las dos en zsh; en bash es un error y no corre nada.
+        const nombres = abre.funcion != null ? [abre.funcion] : efectivo.p
+        if (abre.funcion != null ? abre.crudas.length === abre.trasFunction : shell === 'bash' && nombres.length > 0 && nombres.every((nombre) => /^[A-Za-z_][\w.:-]*$/.test(nombre))) {
+          abre.defineFuncion = true
+          abre.funciones = nombres
+          // `time f() { ... }`: que quede definida depende del shell.
+          abre.envuelta = efectivo.envoltorios.length > 0 || nombres.length > 1
+        }
+      }
+      sigueArgumento = !abre.defineFuncion && (abre.corte === '`(' || abre.esArgumento || !soloEstructura(abre))
+    }
   })
+  // La pieza en la que termina el comando que una expresion corto: la que sigue
+  // a su cierre, y al de las expresiones que vengan pegadas. null, sin cierre.
+  const finDe = new Map()
+  const finDelComando = (k) => {
+    const camino = []
+    let fin = k
+    while (fin != null && ABRE.has(piezas[fin].corte) && !finDe.has(fin)) {
+      camino.push(fin)
+      const cierre = cierreDe.get(fin)
+      fin = cierre == null ? null : cierre + 1
+    }
+    if (fin != null && finDe.has(fin)) fin = finDe.get(fin)
+    for (const j of camino) finDe.set(j, fin)
+    return fin
+  }
 
-  let e = estado ?? { carpeta: cwd, duda: null, alternativa: null, anterior: null, pila: [], cambios: 0 }
+  let e = estado ?? { carpeta: cwd, duda: null, alternativa: null, anterior: null, pila: [], cambios: 0, imposible: false }
   const ambitos = []
   // Lo que puede no haber corrido y sigue abierto, con el estado al entrar.
   let regiones = []
-  let esperaCuerpo = false // tras `f()` o `function f`, el `{` que sigue abre el cuerpo de una funcion
+  // El estado al empezar cada lista (`a && b || c`) y cada tuberia, por nivel de
+  // anidamiento. De una lista mandada al fondo (`a && cd x && b &`), bash corre
+  // todo en un subshell y zsh solo la ultima tuberia: vuelve uno de los dos.
+  let inicios = new Map()
+  let tuberias = new Map()
+  // Un comando cortado por una expresion corre despues de ella (`cd x "$(git
+  // push)"` hace primero el push): queda pendiente hasta la pieza en que termina.
+  const pendientes = new Map()
+  // Tras `f()` o `function f`: la funcion cuyo cuerpo viene. `dudosa`: que quede
+  // definida depende de una condicion o del shell (`x && f() {...}`, `x | f()
+  // {...}`, `time f() {...}`).
+  let esperaCuerpo = null
   let llaves = 0 // bloques de script de PowerShell abiertos
   const yaLeidas = new Set()
   // Releer entero un comando cortado cuesta su largo; el total queda acotado.
@@ -722,15 +1102,61 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, p
   let siFallo = null
   let antes = ''
 
+  // Lo que no se pudo leer queda, una vez por comando, como un push del que no
+  // se sabe nada: eso se pregunta.
+  const sinLeerEn = (lugar) => {
+    if (lectura.avisado) return []
+    lectura.avisado = true
+    return [{ p: ['git', 'push', EXPRESION_SIN_LEER], viaXargs: false, ...lugarDe(lugar) }]
+  }
+  const dudar = (lugar, motivo) => {
+    lugar.duda = dudaDeCarpeta(motivo)
+    lugar.alternativa = null
+    lugar.cambios++
+  }
+  // Cuantos bloques o grupos hay abiertos (sin contar las listas): cada region guarda cuantos tenia debajo.
+  const definir = (nombres, funcion) => {
+    for (const nombre of nombres) lectura.funciones.set(nombre, { ...funcion })
+    lectura.definidas.push(...nombres)
+  }
+  const nivelDeLista = () => (regiones.length ? regiones.at(-1).debajo + (regiones.at(-1).tipo !== 'lista') : 0)
+
+  // Deja `e` como "el estado `a` o el estado `b`": la carpeta de `a`, en duda si
+  // la de `b` es otra. Las dos se conocen (`conLaOtra`) solo si a `b` se llego
+  // con un unico cambio. Si lo que difiere es la pila de `pushd` o la carpeta
+  // anterior, lo que queda en duda es adonde llevan `popd` y `cd -`.
+  const unoUOtro = (a, b, motivo, conLaOtra) => {
+    volverA(e, a)
+    const incierto = () => ({ carpeta: e.carpeta, duda: dudaDeCarpeta(motivo), alternativa: null })
+    if (!mismaPila(a.pila, b.pila)) e.pila = Array.from({ length: Math.max(a.pila.length, b.pila.length) }, incierto)
+    if (!mismoLugar(a.anterior, b.anterior)) e.anterior = incierto()
+    if (mismoLugar(a, b)) return
+    if (a.duda) {
+      // Ya habia una duda: ahora las carpetas posibles son mas de dos.
+      e.alternativa = null
+      return
+    }
+    e.duda = b.duda ?? dudaDeCarpeta(motivo)
+    if (b.carpeta === a.carpeta) e.alternativa = b.alternativa
+    else e.alternativa = (b.duda ? b.alternativa === a.carpeta : conLaOtra) ? b.carpeta : null
+  }
+  // Al salir de algo que puede no haber corrido. Si adentro cambio la carpeta,
+  // vuelve la de antes y queda en duda; la otra carpeta posible se conoce solo
+  // si adentro hubo un unico cambio: con dos (`if a; then cd x; else cd y; fi`)
+  // pudo quedar en cualquiera. Tampoco se conoce si en un bucle el mismo `cd`,
+  // repetido, lleva mas lejos (`while ...; do cd sub; done`, con un sub/sub).
+  const seRepite = (desde, hasta) => {
+    const otraVuelta = path.resolve(hasta, path.relative(desde, hasta))
+    return otraVuelta !== hasta && esCarpeta(otraVuelta)
+  }
   const salirDe = (region) => {
-    if (mismoLugar(e, region.estado)) return
-    // La otra carpeta posible se conoce solo si adentro hubo un unico cambio:
-    // con dos (`if a; then cd x; else cd y; fi`) pudo quedar en cualquiera.
-    const adentro = e.duda || e.cambios - region.estado.cambios !== 1 ? null : e.carpeta
-    volverA(e, region.estado)
-    if (e.duda) return
-    e.duda = dudaDeCarpeta('un `cd` anterior corre solo si se cumple una condicion')
-    e.alternativa = adentro
+    const antesDe = region.estado
+    if (mismoEstado(e, antesDe)) return
+    const fin = copiaDe(e)
+    // El cuerpo de una funcion corre cuando se la llama; y tras un `cd` que
+    // falla seguro (`cd no-existe && ...`), lo que seguia no corrio.
+    if (region.tipo === 'funcion' || (fin.imposible && !antesDe.imposible)) volverA(e, antesDe)
+    else unoUOtro(antesDe, fin, 'un `cd` anterior corre solo si se cumple una condicion', fin.cambios - antesDe.cambios === 1 && !(region.bucle && seRepite(antesDe.carpeta, fin.carpeta)))
   }
   const cerrarHasta = (tipo) => {
     const i = regiones.findLastIndex((region) => region.tipo === tipo)
@@ -739,40 +1165,85 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, p
   // Cierra un bloque de bash (`fi`, `done`, `esac`) o unas llaves. En una
   // tuberia o al fondo, lo compuesto corre en un subshell: al terminar vuelve la
   // carpeta de antes, sin dudas. Unas llaves a secas corren siempre y en este
-  // shell, y su `cd` queda; el cuerpo de una funcion y lo demas, puede no correr.
-  const cerrar = (tipos, corte) => {
+  // shell, y su `cd` queda; lo demas puede no correr. El cuerpo de una funcion
+  // se guarda para leerlo cuando se la llame -- si se la definio a la vista: no
+  // dentro de un subshell, de una tuberia ni de otro bloque, ni con condiciones.
+  const cerrar = (tipos, pieza) => {
     const i = regiones.findLastIndex((region) => tipos.includes(region.tipo))
     if (i === -1) return
     const [region, ...adentro] = regiones.splice(i)
     for (const otra of adentro.reverse()) salirDe(otra)
-    if (corte === '|' || corte === '&') volverA(e, region.estado)
+    if (region.tipo === 'funcion') {
+      const aLaVista = !ambitos.length && !regiones.length && !region.dudosa && pieza.corte !== '|' && pieza.corte !== '&'
+      definir(region.nombres, { cuerpo: aLaVista ? texto.slice(region.abre, pieza.hasta) : null, mueve: !mismoEstado(e, region.estado) })
+      salirDe(region)
+    } else if (pieza.corte === '|' || pieza.corte === '&') volverA(e, region.estado)
     else if (region.tipo !== 'grupo' || region.trasTuberia) salirDe(region)
   }
-  const entrar = (tipo, extra = {}) => regiones.push({ tipo, estado: copiaDe(e), ...extra })
+  const entrar = (tipo, extra = {}) => regiones.push({ tipo, estado: copiaDe(e), debajo: nivelDeLista(), ...extra })
   // Lo que sigue a un `&&` o a un `||` corre solo si lo anterior salio de cierta manera.
-  const entrarEnLista = () => {
+  const entrarEnLista = (antes) => {
     if ((antes === '&&' || antes === '||') && regiones.at(-1)?.tipo !== 'lista') entrar('lista')
   }
 
   for (let k = 0; k < piezas.length; k++) {
     const pieza = piezas[k]
-    if (!yaLeidas.has(k) && pieza.texto.trim()) {
+    if (pendientes.has(k)) yield* pendientes.get(k)()
+    // Con el `;` termina la lista: lo que seguia a su `&&` ya no acompania al `cd`.
+    if (antes === ';' || antes === '&' || antes === '') while (regiones.at(-1)?.tipo === 'lista') salirDe(regiones.pop())
+    if (antes === ';' || antes === '&' || antes === '' || ABRE.has(antes)) inicios.set(nivelDeLista(), { ...copiaDe(e), definidas: lectura.definidas.length })
+    if (antes !== '|' && !CIERRA.has(antes)) tuberias.set(nivelDeLista(), copiaDe(e))
+    // Desde lo que no se pudo leer con certeza (un heredoc sin cierre), tampoco
+    // se sabe en que carpeta corre lo que sigue.
+    if (sinLeerDesde !== -1 && pieza.hasta > sinLeerDesde && !e.duda) dudar(e, 'una parte del comando no se pudo leer con certeza')
+
+    if (!yaLeidas.has(k) && !pieza.esDato && pieza.texto.trim()) {
       const crudas = pieza.crudas
-      // Con el `;` termina la lista: lo que seguia a su `&&` ya no acompania al `cd`.
-      if (antes === ';' || antes === '&' || antes === '') while (regiones.at(-1)?.tipo === 'lista') salirDe(regiones.pop())
+      let cuerpoSuelto = false
+      let llaveSuelta = false
+      let negado = false
+
+      // Lo que sigue a un `||` corre solo si fallo algo de antes: quiza sin el
+      // `cd` que esta lista ya hizo (`a && cd x && b || c`: si fallo `a`).
+      const lista = regiones.at(-1)?.tipo === 'lista' ? regiones.at(-1) : null
+      if (antes === '||' && lista && !mismoEstado(e, lista.estado)) {
+        unoUOtro(copiaDe(e), lista.estado, 'lo que sigue a un `||` corre solo si fallo algo de antes', e.cambios - lista.estado.cambios === 1)
+      }
 
       if (shell === 'bash') {
-        for (const palabra of estructuraDe(crudas)) {
-          if (ABRE_BLOQUE.has(palabra)) entrar('bloque')
-          else if (CIERRA_BLOQUE.has(palabra)) cerrar(['bloque'], pieza.corte)
-          else if (palabra === '}') cerrar(['funcion', 'grupo'], pieza.corte)
-          else if (palabra === '{') {
-            // Tras `x |`, que las llaves corran en este shell depende del shell.
-            entrar(esperaCuerpo ? 'funcion' : 'grupo', { trasTuberia: antes === '|' })
-            esperaCuerpo = false
+        const estructura = pieza.esArgumento ? [] : estructuraDe(crudas)
+        negado = estructura.filter((palabra) => palabra === '!').length % 2 === 1
+        const dudosa = antes === '|' || antes === '&&' || antes === '||' || pieza.envuelta === true
+        // `function f { ...`: el `{` que sigue a `function f` abre su cuerpo.
+        const llaveDeFuncion = pieza.funcion != null && !pieza.defineFuncion ? estructuraDe(crudas.slice(0, pieza.trasFunction)).length : -1
+        if (esperaCuerpo != null && estructura[0] !== '{' && !(pieza.funcion != null && crudas.length === pieza.trasFunction)) {
+          // El cuerpo no va entre llaves. Un comando solo (`f() cmd`, de zsh) se
+          // lee como el cuerpo; un bloque (`f() if ...`), como lo que es, y de
+          // esa funcion queda que no se pudo leer.
+          if (estructura.length) definir(esperaCuerpo.nombres, { cuerpo: null, mueve: true })
+          else {
+            entrar('funcion', { nombres: esperaCuerpo.nombres, abre: pieza.desde, dudosa: esperaCuerpo.dudosa })
+            cuerpoSuelto = true
           }
+          esperaCuerpo = null
         }
-        if (crudas[0] === 'function' && crudas.includes('{')) entrar('funcion')
+        estructura.forEach((palabra, j) => {
+          if (ABRE_BLOQUE.has(palabra)) entrar('bloque', { bucle: BUCLES.has(palabra) })
+          else if (CIERRA_BLOQUE.has(palabra)) cerrar(['bloque'], pieza)
+          else if (palabra === '}') cerrar(['funcion', 'grupo'], pieza)
+          else if (palabra === '{') {
+            if (j === llaveDeFuncion) esperaCuerpo = { nombres: [pieza.funcion], dudosa }
+            // Tras `x |`, que las llaves corran en este shell depende del shell.
+            if (esperaCuerpo != null) entrar('funcion', { nombres: esperaCuerpo.nombres, abre: pieza.desde + pieza.texto.indexOf('{'), dudosa: esperaCuerpo.dudosa })
+            else entrar('grupo', { trasTuberia: antes === '|' })
+            esperaCuerpo = null
+          }
+        })
+        // `{ cd x }`, con la llave pegada al comando: zsh la toma por el cierre y
+        // bash por un argumento mas. Lo que sigue queda en duda.
+        llaveSuelta = !pieza.esArgumento && crudas.length > cabezaDe(crudas).largo && crudas.at(-1) === '}' && regiones.some((region) => region.tipo === 'funcion' || region.tipo === 'grupo')
+        // El encabezado de una definicion: lo que sigue es su cuerpo.
+        if (pieza.defineFuncion || (pieza.funcion != null && crudas.length === pieza.trasFunction)) esperaCuerpo = { nombres: pieza.funciones ?? [pieza.funcion], dudosa }
       } else if (shell === 'powershell') {
         const { abre, cierra } = llavesDe(crudas)
         if (llaves === 0 && abre > 0) entrar('llaves')
@@ -781,30 +1252,23 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, p
 
       let leido = comandoEfectivo(crudas)
       let despues = pieza.corte
-      // Los parentesis vacios tras un nombre son los de una definicion de funcion
-      // (`git() { ... }`), no una expresion: lo que sigue es su cuerpo.
-      const defineFuncion = pieza.corte === '(' && cierreDe.get(k) === k + 1 && !piezas[k + 1].texto.trim() && crudas.length === 1 && !/[$@]$/.test(pieza.texto.trimEnd())
-      if (ABRE.has(pieza.corte) && !defineFuncion) {
+      let termina = k
+      if (ABRE.has(pieza.corte) && !pieza.defineFuncion) {
         // Lo corto una expresion: el comando sigue despues de su cierre, y del de
         // las que vengan. Se lee entero si asi resulta ser uno de los que se leen
         // (`PATH=$(pwd)/bin:$PATH git push origin main` lo es recien entero).
-        const continuaciones = []
-        let fin = k
-        while (fin != null && ABRE.has(piezas[fin].corte)) {
-          const cierre = cierreDe.get(fin)
-          fin = cierre == null ? null : cierre + 1
-          if (fin != null) continuaciones.push(fin)
-        }
+        const fin = finDelComando(k)
         const largo = fin == null ? Infinity : piezas[fin].hasta - pieza.desde
         let entero = null
         if (largo <= porReleer) {
           porReleer -= largo
-          entero = comandoEfectivo(palabras(texto.slice(pieza.desde, piezas[fin].hasta), shell))
+          entero = comandoEfectivo(palabras((pieza.enComillas ? '"' : '') + texto.slice(pieza.desde, piezas[fin].hasta), shell))
         }
         if (entero && seLee(entero.p[0])) {
           leido = entero
           despues = piezas[fin].corte
-          for (const j of continuaciones) yaLeidas.add(j)
+          termina = fin
+          for (let j = k; j !== fin; j = cierreDe.get(j) + 1) yaLeidas.add(cierreDe.get(j) + 1)
         } else if (seLee(leido.p[0])) {
           // Sin cierre, o sin presupuesto para releerlo: queda constancia de que
           // lo completa una expresion que no se leyo.
@@ -812,63 +1276,144 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, p
         }
       }
 
-      const { p, viaXargs, envoltorios } = leido
-      const nombre = p[0] ?? ''
-      // `cd x || exit 1`, `cd x || { echo no; return 1; }`: si el cd falla, no sigue.
-      const saleSiFalla = despues === '||' && saleElQueSigue(piezas, k + 1)
-      const contexto = { antes, despues, envoltorios, shell, saleSiFalla }
-      // Lo que sigue a `cd x ||` corre solo si ese cd fallo: en la carpeta de antes.
-      const aqui = siFallo ?? e
-      siFallo = null
-      if (ES_CD.test(nombre) || ES_PUSHD.test(nombre) || ES_POPD.test(nombre)) {
-        // `cd x && a; b`: si ese cd puede fallar (la carpeta no existe), `a` corre
-        // solo si no fallo, y `b` corre igual: tambien es una lista condicional.
-        if (despues === '&&' && puedeFallar(e, p, shell) && regiones.at(-1)?.tipo !== 'lista') entrar('lista')
-        entrarEnLista()
-        const previo = despues === '||' ? copiaDe(e) : null
-        if (cambiarDeCarpeta(e, p, contexto) && previo) siFallo = previo
-      } else {
-        const anidado = nivel < PROFUNDIDAD_MAXIMA ? comandoAnidado(p, shell) : null
-        // `eval` e `iex` corren en este mismo shell y su `cd` queda -- si el
-        // propio `eval` corre aca: no en una tuberia ni al fondo. El de
+      // Lo que el comando hace. `antes` es el operador que lo precede.
+      const correr = function* (antes) {
+        let { p } = leido
+        const { viaXargs } = leido
+        // Con `!` delante, lo que sigue a `&&` corre si el comando fallo, y lo que
+        // sigue a `||`, si no.
+        const trasEl = negado ? ({ '&&': '||', '||': '&&' }[despues] ?? despues) : despues
+        // `cd x || exit 1`, `cd x || { echo no; return 1; }`: si el cd falla, no sigue.
+        const saleSiFalla = trasEl === '||' && saleElQueSigue(piezas, k + 1)
+        // `quiza`: llega aca solo si fallo lo anterior (`a || cd x`), y puede no correr.
+        const contexto = { antes, despues: trasEl, envoltorios: leido.envoltorios, shell, saleSiFalla, creadas: lectura.creadas, corrieron: lectura.corrieron, quiza: antes === '||' || leido.dudoso === true }
+        // Lo que sigue a `cd x ||` corre solo si ese cd fallo: en la carpeta de antes.
+        const aqui = siFallo ?? e
+        siFallo = null
+
+        // Un comando escrito dentro de otro (`bash -c`, `eval`) o el cuerpo de una
+        // funcion a la que se llama: se lee con las mismas reglas. `eval`, `iex` y
+        // una funcion corren en este mismo shell y su `cd` queda -- si corren aca:
+        // no en una tuberia ni al fondo, y no solo si fallo lo anterior. El de
         // `bash -c "cd x"` termina con ese proceso.
-        const comparte = anidado && ES_EVAL.test(nombre) ? correAca(contexto) : 'no'
-        if (anidado && pasos.quedan <= 0) {
-          // Sin presupuesto para leerlo: queda, una vez, como un push que no se pudo leer.
-          if (!pasos.avisado) yield { p: ['git', 'push', EXPRESION_SIN_LEER], viaXargs: false, ...lugarDe(aqui) }
-          pasos.avisado = true
-        } else if (anidado && comparte === 'si') {
-          entrarEnLista()
-          const previo = despues === '||' ? copiaDe(aqui) : null
-          yield* comandosDe(anidado.comando, aqui.carpeta, anidado.shell, nivel + 1, { estado: aqui, pasos })
-          if (previo && !mismoLugar(aqui, previo)) siFallo = previo
-        } else if (anidado) {
-          const adentro = copiaDe(aqui)
-          yield* comandosDe(anidado.comando, aqui.carpeta, anidado.shell, nivel + 1, { estado: adentro, pasos })
-          if (comparte === 'depende' && !mismoLugar(adentro, aqui)) {
-            e.duda = dudaDeCarpeta(`\`${nombre}\` cierra una tuberia, y que su \`cd\` quede o no depende del shell`)
-            e.alternativa = null
-            e.cambios++
+        const leerAdentro = function* (anidado, comparte, nombre) {
+          // `eval eval eval git push`: cada `eval` vuelve a leer el texto del anterior,
+          // pero no es un comando dentro de otro: no cuenta para la profundidad.
+          const adentroDe = ES_EVAL.test(nombre) && ES_EVAL.test(p[1] ?? '') ? nivel : nivel + 1
+          if (nivel >= PROFUNDIDAD_MAXIMA || lectura.quedan <= 0) {
+            yield* sinLeerEn(aqui)
+          } else if (comparte === 'si' && !contexto.quiza) {
+            entrarEnLista(antes)
+            const previo = trasEl === '||' ? copiaDe(aqui) : null
+            yield* comandosDe(anidado.comando, aqui.carpeta, anidado.shell, adentroDe, { estado: aqui, lectura })
+            if (previo && !mismoLugar(aqui, previo)) siFallo = previo
+          } else {
+            const adentro = copiaDe(aqui)
+            yield* comandosDe(anidado.comando, aqui.carpeta, anidado.shell, adentroDe, { estado: adentro, lectura })
+            if (comparte === 'si' && !mismoEstado(adentro, aqui)) dudar(e, `\`${nombre}\` corre solo si falla el comando anterior`)
+            if (comparte === 'depende' && !mismoEstado(adentro, aqui)) dudar(e, `\`${nombre}\` cierra una tuberia, y que su \`cd\` quede o no depende del shell`)
           }
-        } else if (p.length) {
-          yield { p, viaXargs, ...lugarDe(aqui) }
+        }
+
+        // Una funcion definida antes en el mismo comando: llamarla es correr su
+        // cuerpo. (`builtin x` y `command x` saltean las funciones, y el encabezado
+        // de otra definicion con el mismo nombre no es una llamada.)
+        const funcion = shell === 'bash' && !pieza.esArgumento && !pieza.defineFuncion && !contexto.envoltorios.includes('builtin') && !contexto.envoltorios.includes('command') ? lectura.funciones.get(p[0]) : undefined
+        if (funcion) {
+          const llamada = p[0]
+          const comparte = correAca(contexto)
+          if (funcion.cuerpo == null) {
+            if (funcion.mueve && comparte !== 'no') dudar(aqui, `la funcion \`${llamada}\` cambia de carpeta y no se pudo seguir`)
+            // Que este definida no es seguro: lo que envuelve puede no correr.
+            contexto.quiza = true
+          } else if (!lectura.enCurso.has(llamada)) {
+            lectura.enCurso.add(llamada)
+            yield* leerAdentro({ comando: funcion.cuerpo, shell }, comparte, llamada)
+            lectura.enCurso.delete(llamada)
+          }
+          // Una funcion llamada `git` suele envolver al programa: el comando se lee
+          // tambien tal cual. De las demas, si usa sus argumentos, lo que sigue a su
+          // nombre puede ser un comando: es un envoltorio mas.
+          if (ES_GIT.test(llamada) || ES_GH.test(llamada)) p = [...p]
+          else if (funcion.cuerpo == null || USA_SUS_ARGUMENTOS.test(funcion.cuerpo)) {
+            // (`g X=1 cd x` busca un comando llamado `X=1`: ese `cd` puede no correr.)
+            if (ASIGNACION.test(p[1] ?? '') || PALABRAS_DE_CONTROL.has(p[1])) contexto.quiza = true
+            const resto = comandoEfectivo(p.slice(1))
+            p = resto.p
+            contexto.envoltorios = [...contexto.envoltorios, ...resto.envoltorios]
+          } else p = []
+        }
+
+        const nombre = p[0] ?? ''
+        if (ES_CD.test(nombre) || ES_PUSHD.test(nombre) || ES_POPD.test(nombre)) {
+          // `cd x && a; b`: si ese cd puede fallar (la carpeta no existe), `a` corre
+          // solo si no fallo, y `b` corre igual: tambien es una lista condicional.
+          if (trasEl === '&&' && puedeFallar(e, p, shell, lectura.creadas) && regiones.at(-1)?.tipo !== 'lista') entrar('lista')
+          entrarEnLista(antes)
+          const previo = trasEl === '||' ? copiaDe(e) : null
+          if (cambiarDeCarpeta(e, p, contexto) && previo) siFallo = previo
+        } else {
+          const anidado = comandoAnidado(p, shell)
+          if (anidado) yield* leerAdentro(anidado, ES_EVAL.test(nombre) ? correAca(contexto) : 'no', nombre)
+          else if (p.length && !pieza.defineFuncion) {
+            // `mkdir build`: esa carpeta va a existir cuando corra lo que sigue.
+            if (/^(mkdir|md)$/i.test(nombre) && !aqui.duda && lectura.creadas.size < MAX_CARPETAS_CREADAS) {
+              for (const arg of p.slice(1)) if (!arg.startsWith('-') && !DINAMICO_EN_RUTA.test(arg)) lectura.creadas.add(path.resolve(aqui.carpeta, rutaExpandida(arg)))
+            }
+            yield { p, viaXargs, ...lugarDe(aqui), sinCrear: aqui.imposible || aqui.cambios === 0 }
+            lectura.corrieron++
+          }
         }
       }
+      if (termina === k) yield* correr(antes)
+      else {
+        const antesDelComando = antes
+        pendientes.set(termina, () => correr(antesDelComando))
+      }
 
-      if (shell === 'bash') esperaCuerpo = defineFuncion || (crudas[0] === 'function' && !crudas.includes('{'))
-      else if (shell === 'powershell' && llaves === 0) cerrarHasta('llaves')
+      if (llaveSuelta) dudar(e, 'una llave que cierra pegada a un comando: bash y zsh la leen distinto')
+      if (cuerpoSuelto) cerrar(['funcion'], pieza)
+      if (shell === 'powershell' && llaves === 0) cerrarHasta('llaves')
+    }
+    // Una lista mandada al fondo: en bash corre entera en un subshell y su `cd`
+    // no queda; en zsh, solo su ultima tuberia, y el `cd` de antes queda.
+    if (pieza.corte === '&' && shell === 'bash') {
+      while (regiones.at(-1)?.tipo === 'lista') regiones.pop()
+      const [inicio, tuberia] = [inicios.get(nivelDeLista()), tuberias.get(nivelDeLista())]
+      if (inicio && tuberia) {
+        // Lo mismo las funciones que esa lista definio: en bash no quedan definidas.
+        for (const nombre of lectura.definidas.slice(inicio.definidas)) if (lectura.funciones.has(nombre)) lectura.funciones.get(nombre).cuerpo = null
+        const { definidas: _, ...estadoAlEmpezar } = inicio
+        unoUOtro(estadoAlEmpezar, tuberia, 'que quede el `cd` de una lista mandada al fondo depende del shell', tuberia.cambios - inicio.cambios === 1)
+      }
     }
     if (shell === 'bash') {
       if (ABRE.has(pieza.corte)) {
-        ambitos.push({ e, regiones, esperaCuerpo })
+        if (esperaCuerpo != null && pieza.corte === '(' && !pieza.texto.trim()) {
+          // `f() ( ... )`: el cuerpo es un subshell, y su `cd` termina con el.
+          const cierre = cierreDe.get(k)
+          const aLaVista = cierre != null && !ambitos.length && !regiones.length && !esperaCuerpo.dudosa
+          definir(esperaCuerpo.nombres, { cuerpo: aLaVista ? texto.slice(pieza.hasta, piezas[cierre].hasta + 1) : null, mueve: false })
+          esperaCuerpo = null
+        }
+        ambitos.push({ e, regiones, esperaCuerpo, inicios, tuberias })
         e = copiaDe(e)
         regiones = []
+        inicios = new Map()
+        tuberias = new Map()
       } else if (CIERRA.has(pieza.corte) && ambitos.length) {
-        ;({ e, regiones, esperaCuerpo } = ambitos.pop())
+        ;({ e, regiones, esperaCuerpo, inicios, tuberias } = ambitos.pop())
       }
     }
     antes = pieza.corte
   }
+
+  // Fin del texto. Lo que quedo abierto y podia no correr termina aca: importa
+  // cuando el estado es de quien llamo (un `eval`, una funcion).
+  if (ambitos.length) ({ e, regiones } = ambitos[0])
+  while (regiones.length) salirDe(regiones.pop())
+  // Algo no se pudo leer con certeza y el texto habla de un push: se pregunta.
+  if (sinLeerDesde !== -1 && /push|send-pack/i.test(texto)) yield* sinLeerEn(e)
 }
 
 // Cada `git push` del comando, con la carpeta efectiva en la que corre (el cwd
@@ -877,12 +1422,31 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, p
 // que se sube (xargs, un alias de git definido en la misma linea, un programa
 // que lo lanza); `duda`, cuando no alcanza para saber en que carpeta corre.
 function* pushes(comando, cwd, shell = 'bash') {
-  for (const { p, viaXargs, carpeta, duda: dudaPrevia, alternativa: otraPrevia } of comandosDe(comando, cwd, shell)) {
+  const lectura = nuevaLectura()
+  // Donde evaluar un push cuya carpeta todavia no existe. Si el mismo comando la
+  // crea con `mkdir`, es del repo en el que la crea: su ancestro mas cercano. Si
+  // antes corre otra cosa que pudo crearla (`git clone`, `git worktree add`, un
+  // script), no se sabe que repo habra ahi: queda en duda. Y si antes no corre
+  // nada, no puede existir: ahi el push no llega a correr (`sinCrear`: a esa
+  // carpeta se llego sin que nada pudiera crearla, o es la de la sesion). Como
+  // carpeta alternativa, una que no existe no cuenta.
+  const donde = (ruta) => (esCarpeta(ruta) ? ruta : seCrea(lectura.creadas, ruta) ? laQueExiste(ruta) : null)
+  for (const { p, viaXargs, carpeta, duda: dudaPrevia, alternativa: otraPrevia, sinCrear } of comandosDe(comando, cwd, shell, 0, { lectura })) {
+    const evaluable = (push) => {
+      let { duda, alternativa } = push
+      alternativa = alternativa == null ? null : donde(alternativa)
+      const dir = donde(push.dir)
+      if (dir == null && (donde(carpeta) == null ? !sinCrear : lectura.corrieron > 0)) {
+        duda ??= dudaDeCarpeta(`la carpeta ${push.dir} todavia no existe, y no se sabe que repo habra ahi cuando corra`)
+        alternativa = null
+      }
+      return { ...push, dir: dir ?? push.dir, duda, alternativa }
+    }
     if (ES_LANZADOR.test(p[0])) {
       // `start git push origin main`, `Start-Process git -ArgumentList push,origin,main`:
       // lo que se alcanza a leer decide si toca main; el resto se pregunta.
       const lanzado = pushLanzado(p.slice(1))
-      if (lanzado) yield { dir: carpeta, args: lanzado, incierto: `lo lanza \`${p[0]}\`, que no deja leer sus argumentos con certeza`, duda: dudaPrevia, alternativa: otraPrevia }
+      if (lanzado) yield evaluable({ dir: carpeta, args: lanzado, incierto: `lo lanza \`${p[0]}\`, que no deja leer sus argumentos con certeza`, duda: dudaPrevia, alternativa: otraPrevia })
       continue
     }
     if (!ES_GIT.test(p[0])) continue
@@ -895,7 +1459,7 @@ function* pushes(comando, cwd, shell = 'bash') {
     while (i < p.length && p[i].startsWith('-')) {
       if (p[i] === '-C') {
         const destino = p[i + 1] ?? '.'
-        const expandida = rutaExpandida(dir, destino)
+        const expandida = rutaExpandida(destino)
         const ruta = path.resolve(dir, expandida)
         if (DINAMICO_EN_RUTA.test(expandida) && !esCarpeta(ruta)) {
           // Con una duda anterior ya no hay una sola carpeta alternativa que seguir.
@@ -918,12 +1482,12 @@ function* pushes(comando, cwd, shell = 'bash') {
     if (p[i] !== 'push') {
       // `git send-pack <remoto> <ref>...` es la forma interna de `git push`: se lee
       // igual, y se pregunta si no toca main.
-      if (p[i] === 'send-pack') yield { dir, args: p.slice(i + 1), incierto: 'usa `git send-pack`, la forma interna de `git push`', duda, alternativa }
+      if (p[i] === 'send-pack') yield evaluable({ dir, args: p.slice(i + 1), incierto: 'usa `git send-pack`, la forma interna de `git push`', duda, alternativa })
       // `git -c alias.p=push p origin main`: el subcomando real no se ve.
-      else if (alias) yield { dir, args: [], incierto: 'usa un alias de git definido en la misma linea', duda, alternativa }
+      else if (alias) yield evaluable({ dir, args: [], incierto: 'usa un alias de git definido en la misma linea', duda, alternativa })
       continue
     }
-    yield { dir, args: p.slice(i + 1), incierto: viaXargs ? 'sus argumentos llegan por xargs' : null, duda, alternativa }
+    yield evaluable({ dir, args: p.slice(i + 1), incierto: viaXargs ? 'sus argumentos llegan por xargs' : null, duda, alternativa })
   }
 }
 
@@ -995,9 +1559,12 @@ function cabezasDe(args) {
 // y sus `cabezas`. Son todos, no solo el primero: `(cd <vault> && git push); git
 // push` sube tambien la rama del proyecto, y esa es la que lleva el check.
 function* pushesConCommits(comando, cwd, shell = 'bash') {
-  for (const { dir, args } of pushes(comando, cwd, shell)) {
+  for (const { dir, args, duda, alternativa } of pushes(comando, cwd, shell)) {
     const cabezas = cabezasDe(args)
-    if (cabezas.length) yield { dir, cabezas }
+    if (!cabezas.length) continue
+    yield { dir, cabezas }
+    // Si puede correr en otra carpeta que se conoce, tambien ahi.
+    if (duda && alternativa) yield { dir: alternativa, cabezas }
   }
 }
 
@@ -1024,6 +1591,7 @@ const ramaCorta = (ref) => ref.replace(/^refs\/heads\//, '')
 // origin), que sirve para reconocer el Vault por su URL.
 export function destinosDelPush(comando, cwd, shell = 'bash') {
   const salida = []
+  const vistos = new Set()
   for (const { dir, args, incierto: inciertoDelComando = null, duda = null, alternativa = null } of pushes(comando, cwd, shell)) {
     const posicionales = []
     const destinos = []
@@ -1070,7 +1638,12 @@ export function destinosDelPush(comando, cwd, shell = 'bash') {
     // argumentos llegan por otro lado (xargs, un alias, un lanzador).
     if (refspecs.length === 0 && destinos.length === 0 && !soloTags && !inciertoDelComando) destinos.push(RAMA_ACTUAL, UPSTREAM)
     if (destinos.length || incierto || forzado) {
-      salida.push({ dir, remoto: posicionales[0] ?? null, destinos: [...new Set(destinos)], incierto, forzado, borra: [...new Set(borra)], dudaDeCarpeta: duda, carpetaAlternativa: alternativa })
+      const push = { dir, remoto: posicionales[0] ?? null, destinos: [...new Set(destinos)], incierto, forzado, borra: [...new Set(borra)], dudaDeCarpeta: duda, carpetaAlternativa: alternativa }
+      // El cuerpo de una funcion se lee al definirla y otra vez al llamarla: el
+      // mismo push, en la misma carpeta, cuenta una vez.
+      const clave = JSON.stringify(push)
+      if (!vistos.has(clave)) salida.push(push)
+      vistos.add(clave)
     }
   }
   return salida
@@ -1298,19 +1871,26 @@ function preguntar(lineas) {
   }
 }
 
-// Si la duda es entre dos carpetas conocidas del mismo repo (`cd src && npm test
-// && cd ..; git push`: de fallar los tests, el push corre en src), para las
-// reglas da lo mismo en cual corre.
-function sinDudaEnElMismoRepo(push, correr) {
-  if (!push.dudaDeCarpeta || !push.carpetaAlternativa) return push
-  // Una carpeta que todavia no existe (`mkdir build; cd build`) es del repo en el
-  // que se la va a crear: se mira su ancestro mas cercano que exista.
-  let otra = push.carpetaAlternativa
-  while (!esCarpeta(otra) && path.dirname(otra) !== otra) otra = path.dirname(otra)
-  const [aca, alla] = [raizDelRepo(push.dir, correr), raizDelRepo(otra, correr)]
-  if (!aca || !alla || !mismaCarpeta(aca, alla)) return push
-  return { ...push, dudaDeCarpeta: null, carpetaAlternativa: null, incierto: push.incierto === push.dudaDeCarpeta ? null : push.incierto }
+// Un push que puede correr en una de dos carpetas que se conocen (`npm ci && cd
+// scripts && npm test; cd ..; git push`: de fallar `npm ci`, el `cd ..` sale del
+// proyecto) no deja nada por adivinar: se lo evalua en las dos, sin la duda, y
+// vale lo mas estricto. `unaDe` las nombra, con el motivo, para el mensaje.
+export function candidatos(push) {
+  if (!push.dudaDeCarpeta || !push.carpetaAlternativa) return [push]
+  const otra = push.carpetaAlternativa
+  const cierto = { ...push, dudaDeCarpeta: null, carpetaAlternativa: null, incierto: push.incierto === push.dudaDeCarpeta ? null : push.incierto }
+  if (mismaCarpeta(push.dir, otra)) return [cierto]
+  const unaDe = { carpetas: [push.dir, otra], motivo: push.dudaDeCarpeta }
+  return [
+    { ...cierto, unaDe },
+    { ...cierto, dir: otra, unaDe },
+  ]
 }
+
+const deDosCarpetas = (push) =>
+  push.unaDe
+    ? [`Del comando ${push.unaDe.motivo}: es ${push.unaDe.carpetas[0]} o ${push.unaDe.carpetas[1]}, y se evaluo en las dos. Para que corra en una sola, entra a su carpeta con una ruta literal (\`cd <ruta> && git push ...\`).`]
+    : []
 
 export function prePushMain({ push, correr, vault, enSolo = enModoSolo }) {
   const raiz = raizDelRepo(push.dir, correr)
@@ -1331,6 +1911,7 @@ export function prePushMain({ push, correr, vault, enSolo = enModoSolo }) {
       push.dudaDeCarpeta
         ? 'o vuelve a escribirlo con la carpeta, el remoto y la rama literales (`cd <ruta> && git push origin <rama>`) para que no haga falta preguntar.'
         : 'o vuelve a escribirlo con el remoto y la rama literales (`git push origin <rama>`) para que no haga falta preguntar.',
+      ...deDosCarpetas(push),
     ])
   }
   const sobreElVault = vault.rutas.length
@@ -1344,6 +1925,7 @@ export function prePushMain({ push, correr, vault, enSolo = enModoSolo }) {
         `reglas-pr (SHS-M42): push a \`${RAMA_PROTEGIDA}\` denegado en ${raiz ?? push.dir}.`,
         '`main` del proyecto solo recibe merges desde `dev` por PR: trabaja en la rama del milestone (`tipo/M<n>-slug`, desde `dev`) y pushea esa rama.',
         ...(push.dudaDeCarpeta ? [`Del comando ${push.dudaDeCarpeta}; se evaluo en ${push.dir}. Si el push era para otro repo, entra a su carpeta con una ruta literal (\`cd <ruta> && git push ...\`).`] : []),
+        ...deDosCarpetas(push),
         ...(enElVault ? [] : [sobreElVault]),
         'Para escribir en el Vault usa `souclaude vault-sync --push -m "<mensaje>" --paths Project-<PREFIJO>`, que corre sin confirmacion. No intentes rodear este hook.',
       ].join('\n'),
@@ -1384,11 +1966,16 @@ export function prePushBorrado({ push, correr, vault, enSolo = enModoSolo }) {
   ])
 }
 
-// Cuantos pushes distintos de un mismo comando llevan check de secretos (cada
-// uno corre el script) y cuantos se evaluan contra las reglas de rama (cada uno
-// consulta a git): el hook tiene un plazo.
-const MAX_PUSHES_REVISADOS = 4
+// Cuantas cabezas distintas de un mismo comando llevan check de secretos (cada
+// una corre el script) y cuantos pushes se evaluan contra las reglas de rama
+// (cada uno consulta a git): el hook tiene un plazo, y pasado ese plazo no frena
+// nada. Lo que queda sin revisar por un tope, o porque git no respondio a
+// tiempo, se pregunta: nunca pasa en silencio.
+const MAX_PUSHES_REVISADOS = 12
 const MAX_PUSHES_EVALUADOS = 25
+// El hook esta registrado con 60 s (settings.json): la revision entera tiene que
+// terminar antes, con margen para responder.
+const PLAZO_DE_LA_REVISION = 45_000
 
 export function prePush({ push, raiz, correr }) {
   for (const cabeza of push.cabezas) {
@@ -1607,43 +2194,72 @@ export function procesar(entrada, correr = correrReal) {
     // Primero main: es la regla dura y no necesita el script. Despues secretos.
     const esDeny = (r) => r?.hookSpecificOutput?.permissionDecision === 'deny'
     const vault = configDelVault()
+    // Toda la revision comparte un plazo: lo que git no llega a responder queda
+    // anotado, y al final se pregunta.
+    const vence = Date.now() + PLAZO_DE_LA_REVISION
+    let sinTiempo = false
+    const conPlazo = (cmd, args, opciones = {}) => {
+      const resta = vence - Date.now()
+      const r = resta > 0 ? correr(cmd, args, { ...opciones, timeout: Math.min(opciones.timeout ?? 30_000, resta) }) : { status: null, stdout: '', stderr: '', error: Object.assign(new Error('sin tiempo'), { code: 'ETIMEDOUT' }) }
+      if (r.error?.code === 'ETIMEDOUT') sinTiempo = true
+      return r
+    }
+    // Cada push distinto se evalua una vez (evaluarlo consulta a git), en cada
+    // carpeta en la que puede correr. Primero los que nombran `main` o suben
+    // todas las ramas: si hay que cortar por el tope, que no queden afuera.
+    const porEvaluar = new Map()
+    for (const leido of destinosDelPush(comando, cwd, shell)) for (const push of candidatos(leido)) porEvaluar.set(JSON.stringify(push), push)
+    const urgente = (push) => push.destinos.includes(RAMA_PROTEGIDA) || push.destinos.includes(TODAS)
+    const enOrden = [...porEvaluar.values()].sort((a, b) => urgente(b) - urgente(a))
     // Un deny corta; una pregunta (`ask`) queda pendiente por si mas abajo hay
     // un deny, que siempre gana.
     let pregunta = null
-    const evaluados = new Set()
-    for (const leido of destinosDelPush(comando, cwd, shell)) {
-      // Cada push distinto se evalua una vez (evaluarlo consulta a git), y hasta
-      // un tope: mas pushes que eso en un solo comando no se leen, se preguntan.
-      const clave = JSON.stringify(leido)
-      if (evaluados.has(clave)) continue
-      if (evaluados.size === MAX_PUSHES_EVALUADOS) {
-        pregunta ??= preguntar([`reglas-pr (SHS-M42): este comando hace mas de ${MAX_PUSHES_EVALUADOS} pushes distintos y no se revisaron todos. Confirma con el usuario, o separalo en comandos mas chicos.`])
-        break
-      }
-      evaluados.add(clave)
-      const push = sinDudaEnElMismoRepo(leido, correr)
-      const decision = prePushMain({ push, correr, vault }) ?? prePushForzado({ push, correr }) ?? prePushBorrado({ push, correr, vault })
+    for (const push of enOrden.slice(0, MAX_PUSHES_EVALUADOS)) {
+      const decision = prePushMain({ push, correr: conPlazo, vault }) ?? prePushForzado({ push, correr: conPlazo }) ?? prePushBorrado({ push, correr: conPlazo, vault })
       if (esDeny(decision)) return decision
       pregunta ??= decision
     }
-    // Secretos, en cada repo con reglas al que el comando pushea; con eso en
-    // orden, la frescura de docs/metodologia (solo en el repo del generador,
-    // SHS-M16). Un aviso de "no se pudo validar" viaja junto con la pregunta, si
-    // la hay.
+    if (enOrden.length > MAX_PUSHES_EVALUADOS) {
+      pregunta ??= preguntar([`reglas-pr (SHS-M42): este comando hace mas de ${MAX_PUSHES_EVALUADOS} pushes distintos y no se revisaron todos. Confirma con el usuario, o separalo en comandos mas chicos.`])
+    }
+    // Secretos, en cada repo con reglas al que el comando pushea y por cada
+    // cabeza distinta; con eso en orden, la frescura de docs/metodologia (solo
+    // en el repo del generador, SHS-M16). Un aviso de "no se pudo validar" viaja
+    // junto con la pregunta, si la hay.
     let validacion = null
+    const raices = new Map()
     const revisados = new Set()
+    const conDocs = new Set()
+    let sinRevisar = false
     for (const push of pushesConCommits(comando, cwd, shell)) {
-      const raiz = repoConReglas(push.dir, correr, { tambienEnSolo: true })
-      const clave = `${raiz}\n${push.cabezas.join('\n')}`
-      if (!raiz || revisados.has(clave)) continue
-      if (revisados.size === MAX_PUSHES_REVISADOS) {
-        validacion ??= { systemMessage: `reglas-pr: el comando hace mas de ${MAX_PUSHES_REVISADOS} pushes distintos; en los demas no se validaron secretos.` }
-        break
+      if (!raices.has(push.dir)) raices.set(push.dir, repoConReglas(push.dir, conPlazo, { tambienEnSolo: true }))
+      const raiz = raices.get(push.dir)
+      if (!raiz) continue
+      for (const cabeza of push.cabezas) {
+        const clave = `${raiz}\n${cabeza}`
+        if (revisados.has(clave)) continue
+        if (revisados.size === MAX_PUSHES_REVISADOS) {
+          sinRevisar = true
+          break
+        }
+        revisados.add(clave)
+        const resultado = prePush({ push: { ...push, cabezas: [cabeza] }, raiz, correr: conPlazo })
+        if (esDeny(resultado)) return resultado
+        validacion ??= resultado
       }
-      revisados.add(clave)
-      const resultado = prePush({ push, raiz, correr }) ?? preDocsMetodologia(correr, { raizPush: raiz })
-      if (esDeny(resultado)) return resultado
-      validacion ??= resultado
+      if (sinRevisar) break
+      if (!conDocs.has(raiz)) {
+        conDocs.add(raiz)
+        const resultado = preDocsMetodologia(conPlazo, { raizPush: raiz })
+        if (esDeny(resultado)) return resultado
+        validacion ??= resultado
+      }
+    }
+    if (sinRevisar) {
+      pregunta ??= preguntar([`reglas-pr (SHS-M39): este comando sube mas de ${MAX_PUSHES_REVISADOS} ramas o tags distintos y no en todos se validaron secretos. Confirma con el usuario, o separalo en comandos mas chicos.`])
+    }
+    if (sinTiempo) {
+      pregunta ??= preguntar(['reglas-pr: git no respondio a tiempo y este push no se pudo revisar entero (rama de destino, secretos). Confirma con el usuario antes de seguir, o vuelve a intentarlo.'])
     }
     if (!pregunta) return validacion
     return validacion?.systemMessage ? { ...pregunta, systemMessage: validacion.systemMessage } : pregunta

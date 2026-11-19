@@ -204,8 +204,16 @@ checks de `scripts/check-pr-rules.mjs` y te da el resultado antes que CI:
   **pregunta** al usuario; en una sesión donde nadie puede responder, eso es una
   denegación. `"$(git branch --show-current)"` sí lo resuelve: es la rama actual.
   Para trabajar en otra carpeta y volver, usa un subshell (`(cd sub && npm
-  test)`) o `pushd`/`popd`: un `cd` dentro de un `if` o de un bucle deja al
-  hook sin saber dónde corre el push que venga después.
+  test)`) o `pushd`/`popd`. Tras un `cd` que puede no haber corrido (dentro
+  de un `if` o de un bucle, o después de un `&&` o de un `||`), el hook evalúa
+  el push en las dos carpetas posibles y vale lo más estricto; si no las
+  conoce, pregunta. También pregunta si el push corre en una carpeta que el
+  mismo comando acaba de crear con algo que no sea `mkdir` (un clon, un
+  worktree): haz ese push en un comando aparte.
+- **En el mensaje de un commit, nada de backticks ni `$(…)` entre comillas
+  dobles**: bash los ejecuta (``git commit -m "usa `git push origin main`"``
+  hace ese push, y el hook lo deniega). Usa comillas simples o un heredoc con el
+  delimitador entre comillas (`<<'EOF'`).
 - **Antes de cada `git push`, los secretos**: el grupo `secretos` sobre cada
   commit que el push subiría. Si falla, el push queda denegado con el motivo:
   sigue sus instrucciones (sacar el archivo de los commits sin pushear; si ya se

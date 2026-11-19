@@ -106,6 +106,48 @@ versión, ajustar a él el `to` de las dos migraciones nuevas y regenerar
   nada. La ruta, la pila de `pushd`, la relectura de comandos cortados y la de
   comandos anidados quedan acotadas; lo que no se alcanza a leer, y una expresión
   sin cerrar, se preguntan.
+- **Un push escrito tras una continuación de línea ya no pasa sin verse.** En
+  `git add -A && \` + salto + `git push origin main` —la forma habitual de
+  escribir un comando largo— la barra y el salto quedaban como una palabra
+  delante de `git`, y el hook no veía ese push: ni la protección de `main` ni
+  el check de secretos corrían. Estaba así desde el hook original. Ahora la
+  continuación de línea no deja nada, tampoco en medio de una palabra
+  (`git pu\`+salto+`sh`) ni con el backtick de PowerShell.
+- **El hook lee también lo que se ejecuta dentro de comillas dobles**
+  (`echo "$(git push origin main)"`, un mensaje de commit con
+  `` `git push origin main` `` entre backticks, que bash ejecuta), las comillas
+  `$'…'` (su `\'` no cierra: `git commit -m $'fix: don\'t' && git push origin
+  main` escondía el push), la definición `function f { … }`, las asignaciones
+  que siguen a `then`, `do` o `{` (`then GIT_TRACE=1 git push origin main`) y
+  las funciones definidas en el mismo comando: llamarlas es correr su cuerpo, y
+  la que pasa sus argumentos (`retry() { "$@"; }; retry git push origin main`)
+  es un envoltorio más. Un `<<` dentro de una expresión aritmética
+  (`$((1<<n))`) ya no se toma por un heredoc que escondía las líneas
+  siguientes, ni el heredoc que queda sin cuerpo dentro de una sustitución; el
+  literal de un arreglo (`x=(git push origin main)`) no es un comando.
+- **La carpeta del push se contrastó con bash y zsh de verdad**, con miles de
+  comandos armados al azar y un `git` de mentira que anota dónde corre. De ahí
+  salen las reglas nuevas: el `cd` que sigue a un `||` puede no correr, también
+  para lo que lo acompaña en la misma lista (`ls || cd <vault> && git push
+  origin main`); con `!` delante se invierte; una lista mandada al fondo
+  (`cd x && … &`) deja o no su `cd` según el shell; definir una función no
+  mueve nada y llamarla sí; al salir de un bloque también quedan en duda la
+  pila de `pushd` y la carpeta de `cd -`; el `)` de un patrón de `case`, una
+  palabra `case` suelta o un arreglo ya no cierran antes de tiempo el subshell
+  que los contiene; y de una carpeta que todavía no existe y que no crea un
+  `mkdir` del mismo comando (un clon, un worktree) no se conoce el repo: ese
+  push se pregunta, y si nombra `main` se deniega.
+- **Un push que puede correr en una de dos carpetas conocidas se evalúa en las
+  dos** —reglas de rama y check de secretos— y vale lo más estricto, en vez de
+  preguntar: `npm ci && cd scripts && npm test; cd ..; git push` deja de
+  preguntar, y con la sesión en el Vault `true && cd <proyecto>; git push` se
+  deniega si el proyecto está parado en `main`.
+- **Lo que el hook no alcanza a revisar se pregunta; nunca pasa en silencio**:
+  más pushes distintos que el tope (primero se evalúan los que nombran `main`),
+  más de 12 ramas o tags para el check de secretos (antes eran 4, y el resto
+  pasaba con un aviso), un comando que no se pudo leer con certeza (un heredoc
+  sin cierre) o un `git` que no responde dentro del plazo de la revisión (45 s;
+  el hook está registrado con 60).
 - **Skill `soutec-md-a-pdf`**: del HTML crudo del Markdown solo pasa el marcado
   conocido, y el `href` de un enlace va escapado (antes, un `href` con comillas
   cerraba la etiqueta e inyectaba otra, p. ej. un `<img src="file://…">`). El
