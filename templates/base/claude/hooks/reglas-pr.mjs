@@ -34,20 +34,25 @@
 // ejemplo). En modo solo corre solo el check de secretos antes del push: cubre
 // tambien los merges directos a dev/main, que en solo no pasan por ningun PR.
 //
-// Limite: el hook lee el TEXTO del comando. Ve el push a traves de envoltorios
-// (`command git push`), agrupaciones (`(git push)`), sustituciones (`$(git
-// push)`, tambien entre comillas dobles), comandos anidados (`bash -c`,
-// `eval`, el guion que un shell lee de su entrada), funciones definidas en el
-// mismo comando y lanzadores (`start`, `Start-Process`), y sigue los `cd` que
-// de verdad cambian la carpeta de lo que viene despues (no el de un subshell,
-// una tuberia o `nohup cd`). Si el
-// push puede correr en una de dos carpetas, lo evalua en las dos; si no puede
-// saber en cual corre, o no alcanza a leer el comando, pregunta. No ve el push
-// que hace un script (`./deploy.sh`, `source x.sh`), otro programa (`make`,
-// `python -c`), un alias configurado en git, una llamada a la API (`gh api`)
-// ni el comando cuyo nombre sale de una variable (`$GIT push`). Es una red
-// para el error honesto; la barrera de `main` es la proteccion de rama en
-// GitHub.
+// Limite: el hook lee el TEXTO del comando, no lo ejecuta. Ve el push a traves
+// de envoltorios (`command git push`), agrupaciones (`(git push)`),
+// sustituciones (`$(git push)`, tambien entre comillas dobles), comandos
+// anidados (`bash -c`, `eval`, el guion que un shell lee de su entrada),
+// funciones definidas en el mismo comando (con los argumentos de cada llamada),
+// lanzadores (`start`, `Start-Process`) y otros programas que lo corren
+// (`caffeinate git push`, `find -exec git push`), y sigue los `cd` que de
+// verdad cambian la carpeta de lo que viene despues (no el de un subshell, una
+// tuberia o `nohup cd`) y los cambios de rama del mismo comando (`git checkout
+// main && git push`). Si el push puede correr en una de dos carpetas, lo evalua
+// en las dos; si no puede saber en cual corre o que sube, o no alcanza a leer
+// el comando, pregunta: tambien si el programa sale de una variable (`$GIT
+// push`) o recibe un push escrito que puede correr (`python -c`, `git rebase
+// -x`). No ve lo que no esta en el texto: el push que hace un script
+// (`./deploy.sh`, `make`), un alias o una funcion de la configuracion del
+// usuario, un programa que arma el comando (`base64 -d | sh`), una llamada a la
+// API (`gh api`), ni todas las formas de PowerShell. Es una red para el error
+// honesto; la barrera de `main` es la proteccion de rama en GitHub, que
+// `souclaude init` y `upgrade` configuran en modo equipo.
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -241,7 +246,12 @@ function leerPiezas(comando, shell = 'bash') {
     let aritmeticas = 0
     let sustituciones = 0
     let subindices = 0
+    // El ultimo corte: tras `&&`, `||` o `|` al final de una linea, el comando
+    // sigue en la siguiente (tambien tras lineas en blanco o comentarios).
+    let ultimoCorte = null
+    const sigueDelOperador = (i) => shell !== 'cmd' && ['&&', '||', '|'].includes(ultimoCorte) && !comando.slice(desde, i).trim()
     const cortar = (hasta, corte, largo = 1) => {
+      ultimoCorte = corte
       const pieza = { texto: comando.slice(desde, hasta), desde, hasta, corte }
       if (sigueEnComillas) pieza.enComillas = true
       sigueEnComillas = false
@@ -342,13 +352,23 @@ function leerPiezas(comando, shell = 'bash') {
         }
       } else if (c === '&' && ((i > desde && /[<>]/.test(comando[i - 1])) || comando[i + 1] === '>')) {
         // 2>&1, &>: una redireccion, no un operador.
+      } else if (shell === 'powershell' && c === '<' && comando[i + 1] === '#') {
+        // `<# ... #>`, un comentario de bloque de PowerShell.
+        const fin = comando.indexOf('#>', i + 2)
+        const hasta = fin === -1 || fin + 2 > limite ? limite : fin + 2
+        cortar(i, ';', hasta - i)
+        i = desde - 1
+        enPalabra = false
       } else if (c === '#' && empiezaPalabra && shell !== 'cmd') {
         let fin = comando.indexOf('\n', i)
         if (fin === -1 || fin > limite) fin = limite
         // Dentro de unos backticks, el que los cierra tambien termina el comentario.
         const backtick = shell === 'bash' && (cierre === '`' || enBackticks) ? comando.indexOf('`', i) : -1
         if (backtick !== -1 && backtick < fin) fin = backtick
-        cortar(i, ';', fin - i)
+        if (sigueDelOperador(i) && backtick === -1) {
+          // Un comentario tras `&&` al final de la linea: la lista sigue abajo.
+          desde = fin
+        } else cortar(i, ';', fin - i)
         i = desde - 1
         enPalabra = false
       } else if (c === '<' && comando[i + 1] === '<' && shell === 'bash') {
@@ -391,11 +411,16 @@ function leerPiezas(comando, shell = 'bash') {
           heredocs = heredocs.filter((heredoc) => heredoc.sustituciones <= sustituciones)
         }
         cortar(i, c)
-        enPalabra = true
+        // Tras cerrar un subshell, lo que sigue empieza otra palabra: `(true)#; cd
+        // x` es un comentario. Tras cerrar una sustitucion, la palabra sigue.
+        enPalabra = shell !== 'bash' || tipo !== 'g'
       } else if (c === '[' && i > inicio && /[A-Za-z0-9_$]/.test(comando[i - 1])) {
         subindices++
       } else if (c === ']' && subindices) {
         subindices--
+      } else if ((c === '\n' || c === '\r') && !heredocs.length && sigueDelOperador(i)) {
+        // `false &&` + salto + `cd x`: el `cd` es parte de la misma lista.
+        enPalabra = false
       } else if (c === ';' || c === '\n' || c === '\r') {
         // `;;`, `;&`, `;;&` y `;|` terminan una rama de `case`: no mandan nada al fondo.
         let largo = 1
@@ -609,6 +634,60 @@ const ES_EVAL = /^(eval|iex|invoke-expression)$/i
 // `icm` y `Start-Job`/`sajb`.
 const ES_LANZADOR = /^(start|start-process|saps|invoke-command|icm|start-job|sajb)$/i
 const OPCIONES_PUSH_CON_VALOR = new Set(['--repo', '-o', '--push-option', '--receive-pack', '--exec'])
+// Las opciones largas de `git push`, y sus negaciones: git acepta cualquier
+// prefijo que no sea ambiguo (`--al` es `--all`; `--mi`, `--mirror`; `--del`,
+// `--delete`). Y las cortas que se agrupan (`-uf`); `-o` lleva un valor, pegado
+// (`-ox`) o en la palabra siguiente (`-uo x`).
+const OPCIONES_LARGAS_DEL_PUSH = ['verbose', 'quiet', 'repo', 'all', 'branches', 'mirror', 'delete', 'tags', 'dry-run', 'porcelain', 'force', 'force-with-lease', 'force-if-includes', 'recurse-submodules', 'thin', 'receive-pack', 'exec', 'set-upstream', 'progress', 'prune', 'verify', 'follow-tags', 'signed', 'atomic', 'push-option', 'ipv4', 'ipv6'].flatMap((o) => [`--${o}`, `--no-${o}`])
+const CORTAS_DEL_PUSH = new Set(['v', 'q', 'n', 'f', 'd', 'u', '4', '6'])
+
+// Los argumentos de un `git push` como los entiende git: cada opcion larga
+// abreviada con su nombre entero, y cada grupo de cortas por separado. Lo que
+// git no entenderia (un prefijo ambiguo, una corta que no existe) queda como
+// esta: con eso el push no corre.
+export function argumentosDelPush(args) {
+  const salida = []
+  for (let j = 0; j < args.length; j++) {
+    const a = args[j]
+    if (a === '--') {
+      salida.push(...args.slice(j))
+      break
+    }
+    const larga = a.match(/^(--[^=]+)(=[\s\S]*)?$/)
+    if (larga) {
+      const [, nombre, valor = ''] = larga
+      const posibles = OPCIONES_LARGAS_DEL_PUSH.includes(nombre) ? [nombre] : OPCIONES_LARGAS_DEL_PUSH.filter((o) => o.startsWith(nombre))
+      salida.push(posibles.length === 1 ? posibles[0] + valor : a)
+      continue
+    }
+    if (/^-[^-]/.test(a)) {
+      const partes = []
+      let entiende = true
+      let valor = null
+      for (let k = 1; k < a.length; k++) {
+        if (a[k] === 'o') {
+          valor = k + 1 < a.length ? a.slice(k + 1) : null
+          partes.push('-o')
+          break
+        }
+        if (!CORTAS_DEL_PUSH.has(a[k])) {
+          entiende = false
+          break
+        }
+        partes.push(`-${a[k]}`)
+      }
+      if (!entiende) {
+        salida.push(a)
+        continue
+      }
+      salida.push(...partes)
+      if (partes.at(-1) === '-o') salida.push(valor ?? args[++j] ?? '')
+      continue
+    }
+    salida.push(a)
+  }
+  return salida
+}
 // El refspec "matching": `:` a secas (o `+:`) sube todas las ramas que existen
 // con el mismo nombre en los dos lados -- main incluida --, igual que --all.
 const REFSPEC_MATCHING = /^\+?:$/
@@ -655,7 +734,8 @@ export function comandoEfectivo(palabrasDelSegmento) {
   let repite = false
   const envoltorios = []
   // `git push` entre backticks, o {git push} pegado a las llaves (PowerShell).
-  const abre = p[0]?.match(/^[`{]+/)?.[0]
+  // (No `{cd,} x`: eso es una expansion de llaves de bash, y el comando es `cd`.)
+  const abre = /^\{[^{}]*,[^{}]*\}/.test(p[0] ?? '') ? null : p[0]?.match(/^[`{]+/)?.[0]
   if (abre) {
     // (Se quitan solo las palabras que quedaron vacias al sacarles eso: un
     // argumento vacio, `''`, sigue siendo una palabra.)
@@ -721,12 +801,22 @@ const loQueEntrega = (texto) => texto.match(SOLO_UN_CAT)?.[2] ?? texto
 
 export function comandoAnidado(p, shell = 'bash') {
   const primero = p[0] ?? ''
-  if (ES_EVAL.test(primero)) return p.length > 1 ? { comando: loQueEntrega(p.slice(1).join(' ')), shell } : null
+  if (ES_EVAL.test(primero)) {
+    // (`eval -- git push`: el `--` no es parte del comando.)
+    const resto = p[1] === '--' ? p.slice(2) : p.slice(1)
+    return resto.length ? { comando: loQueEntrega(resto.join(' ')), shell } : null
+  }
   if (ES_SHELL.test(primero)) {
     const i = p.findIndex((w, k) => k > 0 && /^-[a-zA-Z]*c$/.test(w))
     return i !== -1 && p[i + 1] != null ? { comando: loQueEntrega(p[i + 1]), shell: 'bash' } : null
   }
   if (ES_POWERSHELL.test(primero)) {
+    // `-EncodedCommand` (o `-e`, `-ec`, `-enc`...): el comando en base64, en UTF-16LE.
+    const codificado = p.findIndex((w, k) => k > 0 && /^-(e|ec|en|enc|enco|encod|encode|encoded|encodedc|encodedco|encodedcom|encodedcomm|encodedcomma|encodedcomman|encodedcommand)$/i.test(w))
+    if (codificado !== -1 && p[codificado + 1] != null) {
+      const texto = Buffer.from(p[codificado + 1], 'base64').toString('utf16le')
+      return texto.trim() ? { comando: texto, shell: 'powershell' } : null
+    }
     const i = p.findIndex((w, k) => k > 0 && /^-c(o(m(m(a(n(d)?)?)?)?)?)?$/i.test(w))
     return i !== -1 && p[i + 1] != null ? { comando: p.slice(i + 1).join(' '), shell: 'powershell' } : null
   }
@@ -795,6 +885,9 @@ const MAX_CARPETAS_CREADAS = 256
 // `.`, relativos a ella (con una duda de por medio, `cd "$(pwd)"` no la despeja).
 function rutaExpandida(destino) {
   if (destino === '~' || /^~[\\/]/.test(destino)) return path.join(os.homedir(), destino.slice(1))
+  // `~-`, `~+`, `~1`, `~usuario`: la carpeta anterior, la actual, una de la pila
+  // o la de otro usuario. Se resuelven recien al ejecutar.
+  if (/^~[^\\/]/.test(destino)) return `\${${destino}}`
   return rutaNativa(destino.replace(HOGAR, () => os.homedir()).replace(AQUI, () => '.'))
 }
 
@@ -896,6 +989,23 @@ function cambiarDeCarpeta(e, p, contexto) {
       }
     }
   }
+  if (contexto.shell === 'bash') {
+    // `cd --foo x`: bash no conoce esa opcion, y zsh la toma por otra carpeta:
+    // en los dos el `cd` falla.
+    const primera = p.slice(1).findIndex((x) => !x.startsWith('-') || x === '-')
+    if ((primera === -1 ? p.slice(1) : p.slice(1, 1 + primera)).some((x) => /^--./.test(x))) return false
+  }
+  // `Set-Location x -WhatIf`, o con un parametro que no tiene: no se mueve.
+  if (contexto.shell === 'powershell' && ES_CD.test(nombre)) {
+    const raro = p.slice(1).find((x) => /^-[A-Za-z]/.test(x) && !/^-(p|pa|pat|path|l|li|lit|lite|liter|litera|literal|literalp|literalpa|literalpat|literalpath|passthru|stackname|verbose|debug|erroraction|ea|warningaction|wa|informationaction|infa|errorvariable|ev|warningvariable|wv|informationvariable|iv|outvariable|ov|outbuffer|ob|pipelinevariable|pv)$/i.test(x))
+    if (raro) {
+      if (correAca(contexto) === 'no') return false
+      e.duda = dudaDeCarpeta(`\`${p.join(' ')}\` lleva un parametro (\`${raro}\`) con el que puede no moverse`)
+      e.alternativa = null
+      e.cambios++
+      return true
+    }
+  }
   const corre = correAca(contexto)
   if (corre === 'no') return false
   // Con una duda anterior, una duda mas deja mas de dos carpetas posibles.
@@ -964,6 +1074,10 @@ function cambiarDeCarpeta(e, p, contexto) {
   // por `b` en la ruta actual.
   if (args.filter((x) => x === '-' || !x.startsWith('-')).length > 1) return dudar(`\`${p.join(' ')}\` tiene mas de un destino, y que hace con eso depende del shell`)
   const destino = args.find((x) => !x.startsWith('-'))
+  // `pushd -` va a la carpeta anterior y apila la actual; lo que queda en la pila no se sigue.
+  if (apila && args.includes('-')) return dudar(`\`${p.join(' ')}\` va a la carpeta anterior, y lo que deja en la pila depende del shell`)
+  // `cd -P x/..`: con -P, `..` sale de la carpeta real, que con un enlace simbolico es otra.
+  if (destino != null && contexto.shell === 'bash' && /(^|[\\/])\.\.([\\/]|$)/.test(destino) && args.some((x) => /^-[LPe@]*P/.test(x))) return dudar(`\`${p.join(' ')}\` resuelve \`..\` sobre la carpeta real: con un enlace simbolico, es otra`)
   if (destino == null) {
     if (apila) {
       // `pushd` a secas intercambia la carpeta actual con la ultima apilada. Con
@@ -1009,7 +1123,7 @@ function cambiarDeCarpeta(e, p, contexto) {
   // otra carpeta posible no se conoce. En Windows, las rutas propias de Git
   // Bash (`/tmp`) no se pueden comprobar.
   const comprobable = !(process.platform === 'win32' && /^[\\/](?![\\/])/.test(expandida))
-  const falta = comprobable && !esCarpeta(ruta) && !seCrea(contexto.creadas, ruta)
+  const falta = comprobable && ((!esCarpeta(ruta) && !seCrea(contexto.creadas, ruta)) || cruzaUnaQueNoExiste(e.carpeta, expandida, contexto.creadas))
   const siFallaNoSigue = contexto.despues === '&&' || (contexto.despues === '||' && contexto.saleSiFalla)
   if (falta && !siFallaNoSigue) {
     dudar(`\`${nombre} ${destino}\` puede fallar: esa carpeta no existe ahora`)
@@ -1060,7 +1174,22 @@ function puedeFallar(e, p, shell, creadas) {
   const expandida = rutaExpandida(destino)
   if (process.platform === 'win32' && /^[\\/](?![\\/])/.test(expandida)) return false
   const ruta = path.resolve(e.carpeta, expandida)
-  return !DINAMICO_EN_RUTA.test(expandida) && !esCarpeta(ruta) && !seCrea(creadas, ruta)
+  return !DINAMICO_EN_RUTA.test(expandida) && ((!esCarpeta(ruta) && !seCrea(creadas, ruta)) || cruzaUnaQueNoExiste(e.carpeta, expandida, creadas))
+}
+
+// `cd x/no-existe/..`: bash y zsh comprueban que exista cada carpeta que esta
+// antes de un `..`; si una no existe, el `cd` falla aunque la ruta final exista.
+function cruzaUnaQueNoExiste(base, ruta, creadas = new Set()) {
+  if (!/(^|[\\/])\.\.([\\/]|$)/.test(ruta)) return false
+  let actual = path.isAbsolute(ruta) ? path.parse(path.resolve(ruta)).root : base
+  for (const parte of ruta.split(/[\\/]+/)) {
+    if (parte === '' || parte === '.') continue
+    if (parte === '..') {
+      if (!esCarpeta(actual) && !seCrea(creadas, actual)) return true
+      actual = path.dirname(actual)
+    } else actual = path.join(actual, parte)
+  }
+  return false
 }
 
 // `$(git branch --show-current)` y sus equivalentes SI se pueden leer del
@@ -1572,7 +1701,8 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, l
     // adentro (o la funcion misma) no queda definido afuera, en ningun shell.
     const enSubshell = pieza.corte === '|' || pieza.corte === '&'
     if (region.tipo === 'funcion') {
-      const cierta = !region.dudosa && regiones.every((otra) => otra.tipo === 'grupo' && !otra.trasTuberia)
+      // (`f() { ...; } >/no/existe`: esa redireccion es de cada llamada, y si falla la funcion no corre.)
+      const cierta = !region.dudosa && regiones.every((otra) => otra.tipo === 'grupo' && !otra.trasTuberia) && !redireccionDudosa(pieza.texto.slice(pieza.texto.lastIndexOf('}') + 1))
       if (!enSubshell) definir(region.nombres, { cuerpo: texto.slice(region.abre, pieza.hasta), cierta, mueve: !mismoEstado(e, region.estado) })
       salirDe(region)
     } else if (enSubshell) {
@@ -1707,7 +1837,10 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, l
         fuentes.sort((x, y) => x.en - y.en)
         const posibles = [fuentes.at(-1).texto]
         if (fuentes.length > 1 && fuentes.every((fuente) => fuente.texto != null)) posibles.push(fuentes.map((fuente) => fuente.texto).join('\n'))
-        return [...new Set(posibles.filter((posible) => posible != null))]
+        const legibles = [...new Set(posibles.filter((posible) => posible != null))]
+        // (Un archivo, o lo que imprime otro comando con `< <(...)`, no se puede leer.)
+        legibles.ilegible = fuentes.some((fuente) => fuente.texto == null)
+        return legibles
       }
       const emite = /^cat$/.test(leido.p[0] ?? '') && leido.p.length === 1 ? suEntrada() : /^(echo|printf)$/.test(leido.p[0] ?? '') ? [leido.p.slice(1).join(' ').replaceAll('\\n', '\n')] : []
       loQueViene = despues === '|' && emite.length ? emite : null
@@ -1787,6 +1920,8 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, l
           // puede no correr.
           const segura = funcion.cierta && conocidos.length === 1 && funcion.cuerpos.length === 1 && lecturas.length === 1
           if (!segura) contexto.quiza = true
+          // `f >/no/existe/x`: si falla su redireccion, la funcion no corre.
+          if (redireccionDudosa(contexto.texto ?? '')) contexto.quiza = true
           if (lectura.enCurso.has(llamada)) {
             // Se llama a si misma: lo que hace esa otra vuelta no se sigue.
             if (funcion.mueve && comparte !== 'no') dudar(aqui, `la funcion \`${llamada}\` se llama a si misma y cambia de carpeta`)
@@ -1866,6 +2001,11 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, l
         } else if (leeLaEntrada) {
           // Cada texto posible es un guion entero; si hay mas de uno, cualquiera puede ser el que corre.
           const guiones = suEntrada()
+          // `source /dev/stdin < <(echo cd x)`: lo que lee no se ve, y corre aca.
+          if (guiones.ilegible && /^(source|\.)$/.test(nombre) && correAca(contexto) !== 'no') {
+            dudar(e, `lo que lee \`${nombre}\` sale de un archivo o de lo que imprime otro comando`)
+            if (/push|send-pack/i.test(texto.slice(pieza.desde, piezas[ABRE.has(pieza.corte) ? (finDelComando(k) ?? termina) : termina].hasta))) yield* sinLeerEn(aqui)
+          }
           if (guiones.length > 1) contexto.quiza = true
           for (const guion of guiones) yield* leerAdentro({ comando: guion, shell: 'bash' }, ES_SHELL.test(nombre) ? 'no' : correAca(contexto), nombre, { marco: !ES_SHELL.test(nombre) })
         } else if (nombre === 'trap' && shell === 'bash') {
@@ -1914,7 +2054,9 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, l
           // Lo que corre sale de una variable o de lo que imprime otro comando
           // (`eval "$(...)"`, `$(echo cd) x`, `source <(...)`): puede ser un `cd` o
           // un push que el texto no muestra.
-          const oculto = (anidado && ES_EVAL.test(nombre) && /[$`]/.test(anidado.comando)) || /^(\$\(|`)/.test(nombre) || (shell === 'bash' && /^(source|\.)$/.test(nombre) && /<\(|[$`]/.test(tramo))
+          // (Tambien `source =(...)`, de zsh, y un comando que sale de una expansion
+          // y puede ser un `cd`: `${X:-cd} x`, `{cd,} x`.)
+          const oculto = (anidado && ES_EVAL.test(nombre) && /[$`]/.test(anidado.comando)) || /^(\$\(|`)/.test(nombre) || (shell === 'bash' && /^(source|\.)$/.test(nombre) && /<\(|=\(|[$`]/.test(tramo)) || (shell === 'bash' && /[$`{]/.test(nombre) && /(^|[^A-Za-z])(cd|pushd|popd|chdir|source)([^A-Za-z]|$)/.test(nombre))
           if (oculto) {
             if (/\$\{?[A-Za-z_]|\b(cd|pushd|popd|source|eval)\b/.test(anidado?.comando ?? tramo) && correAca(contexto) !== 'no') dudar(e, `lo que corre \`${nombre}\` sale de una variable o de lo que imprime otro comando`)
             if (/push|send-pack/i.test(tramo)) yield* sinLeerEn(aqui)
@@ -1923,7 +2065,17 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, l
           else if (p.length && !pieza.defineFuncion) {
             // `mkdir build`: esa carpeta va a existir cuando corra lo que sigue.
             if (/^(mkdir|md)$/i.test(nombre) && !aqui.duda && lectura.creadas.size < MAX_CARPETAS_CREADAS) {
-              for (const arg of p.slice(1)) if (!arg.startsWith('-') && !DINAMICO_EN_RUTA.test(arg)) lectura.creadas.add(path.resolve(aqui.carpeta, rutaExpandida(arg)))
+              // Sin `-p`, mkdir no crea las carpetas de arriba; y falla si ya hay un
+              // archivo con ese nombre.
+              const conPadres = /^md$/i.test(nombre) || p.some((x) => /^-[a-zA-Z]*p/.test(x) || x === '--parents')
+              for (let j = 1; j < p.length; j++) {
+                if (/^(-m|--mode)$/.test(p[j])) j++
+                if (j >= p.length || p[j].startsWith('-') || DINAMICO_EN_RUTA.test(p[j])) continue
+                const ruta = path.resolve(aqui.carpeta, rutaExpandida(p[j]))
+                if (fs.existsSync(ruta) && !esCarpeta(ruta)) continue
+                if (!conPadres && !esCarpeta(path.dirname(ruta)) && !seCrea(lectura.creadas, path.dirname(ruta))) continue
+                lectura.creadas.add(ruta)
+              }
             }
             // `GIT_DIR=x git push`: el repo no lo dice la carpeta.
             const otroRepo = shell === 'bash' && ES_GIT.test(nombre) && /(^|[\s;&|(])GIT_(DIR|WORK_TREE)=/.test(tramo)
@@ -2011,10 +2163,45 @@ function* pushes(comando, cwd, shell = 'bash') {
   const donde = (ruta) => (esCarpeta(ruta) ? ruta : seCrea(lectura.creadas, ruta) ? laQueExiste(ruta) : null)
   // `GIT_DIR=...`, `export GIT_WORK_TREE=...`: el repo no lo dice la carpeta.
   const fijaElRepo = shell === 'bash' && /(^|[\s;&|(`])(export\s+|env\s+(-\S+\s+)*)?GIT_(DIR|WORK_TREE)=/.test(comando)
-  for (const { p, viaXargs, carpeta, duda: dudaPrevia, alternativa: otraPrevia, sinCrear, otroRepo: otroRepoPrevio } of comandosDe(comando, cwd, shell, 0, { lectura })) {
+  // La configuracion de git que decide a donde va un push (el remoto, su URL, el
+  // refspec por defecto, push.default, el upstream) cambiada en el mismo
+  // comando: con `-c`, con `GIT_CONFIG_*`, o con un `git config`, `git remote
+  // add` o `git branch -u` que corre antes. Lo que dice ahora el repo ya no vale.
+  const configPorEntorno = /(^|[\s;&|(`])(export\s+|env\s+(-\S+\s+)*)?GIT_CONFIG(_[A-Z0-9_]+)?=/.test(comando)
+  let configCambiada = false
+  // Un alias de git definido en el mismo comando (`git config alias.p push`):
+  // cualquier subcomando puede ser un push.
+  // (Se mira una sola vez: repetirlo por cada comando leido costaba el largo del
+  // texto entero cada vez.)
+  const hablaDePush = /push|send-pack/i.test(comando)
+  const aliasEnElComando = /\balias\./i.test(comando) && hablaDePush
+  let configDelPush = false
+  // La rama en la que queda el repo si el mismo comando cambia de rama antes del
+  // push (`git checkout main && git push`): la actual se lee de git antes de que
+  // el comando corra, y ya no es la que sube. `{ nombre, creada }`; nombre null
+  // si no se sabe cual queda (`git checkout -`, `gh pr checkout`).
+  let cambioDeRama
+  // Lo que cambia la carpeta de una forma que este hook no sigue (un `trap`, una
+  // funcion que el shell corre solo, una opcion de `cd`...): ningun push del
+  // comando tiene una carpeta segura.
+  const sinModelo = SIN_MODELO.find(([forma]) => forma.test(comando))?.[1] ?? null
+  // PowerShell: un alias, una funcion que pasa `@args` o un bloque armado como
+  // texto pueden correr un push que no se lee.
+  if (shell === 'powershell' && hablaDePush && /\b(set-alias|new-alias|sal|nal)\b|@args\b|\[scriptblock\]|::create\s*\(|&\s*[($]/i.test(comando)) {
+    yield { dir: cwd, args: [], incierto: 'un alias, una funcion o un bloque de PowerShell pueden correr un push que no se lee del texto', duda: null, alternativa: null }
+  }
+  for (const { p: leidas, viaXargs, carpeta, duda: dudaLeida, alternativa: otraPrevia, sinCrear, otroRepo: otroRepoPrevio } of comandosDe(comando, cwd, shell, 0, { lectura })) {
+    let p = leidas
+    let dudaPrevia = dudaLeida
+    configDelPush = configPorEntorno || configCambiada
     const evaluable = (push) => {
+      push = { ...push, args: argumentosDelPush(push.args ?? []), ...(configDelPush && { configDelPush }), ...(cambioDeRama && { ramaActual: cambioDeRama }) }
       let { duda, alternativa } = push
       alternativa = alternativa == null ? null : donde(alternativa)
+      if (sinModelo) {
+        duda ??= dudaDeCarpeta(sinModelo)
+        alternativa = null
+      }
       const dir = donde(push.dir)
       if (dir == null && (donde(carpeta) == null ? !sinCrear : lectura.corrieron > 0)) {
         duda ??= dudaDeCarpeta(`la carpeta ${push.dir} todavia no existe, y no se sabe que repo habra ahi cuando corra`)
@@ -2028,6 +2215,21 @@ function* pushes(comando, cwd, shell = 'bash') {
       const lanzado = pushLanzado(p.slice(1))
       if (lanzado) yield evaluable({ dir: carpeta, args: lanzado, incierto: `lo lanza \`${p[0]}\`, que no deja leer sus argumentos con certeza`, duda: dudaPrevia, alternativa: otraPrevia })
       continue
+    }
+    // zsh: `=git` es la ruta de `git`.
+    if (shell === 'bash' && /^=[^=]/.test(p[0] ?? '') && ES_GIT.test(p[0].slice(1))) p = [p[0].slice(1), ...p.slice(1)]
+    // Un push que no esta donde se lo busca: dentro de otro comando (se lee desde
+    // ahi), detras de un programa que sale de una variable, o escrito en un
+    // argumento que el programa puede correr (se pregunta).
+    if (ES_GH.test(p[0] ?? '') && p[1] === 'pr' && p[2] === 'checkout') cambioDeRama = { nombre: null, creada: false }
+    const adentro = pushDentroDe(p, hablaDePush, shell)
+    if (adentro?.incierto) {
+      yield evaluable({ dir: carpeta, args: [], incierto: adentro.incierto, duda: dudaPrevia, alternativa: otraPrevia })
+      continue
+    }
+    if (adentro) {
+      p = p.slice(adentro.desde)
+      if (adentro.otraCarpeta) dudaPrevia ??= dudaDeCarpeta(adentro.otraCarpeta)
     }
     if (!ES_GIT.test(p[0])) continue
 
@@ -2053,12 +2255,17 @@ function* pushes(comando, cwd, shell = 'bash') {
           dir = ruta
         }
         i += 2
-      } else if (['-c', '--git-dir', '--work-tree', '--namespace'].includes(p[i])) {
-        if (p[i] === '-c' && /^alias\./i.test(p[i + 1] ?? '')) alias = true
+      } else if (['-c', '--git-dir', '--work-tree', '--namespace', '--config-env'].includes(p[i])) {
+        const clave = p[i] === '-c' || p[i] === '--config-env' ? (p[i + 1] ?? '') : ''
+        if (/^alias\./i.test(clave)) alias = true
+        if (CONFIG_DEL_PUSH.test(clave)) configDelPush = true
         if (p[i] === '--git-dir' || p[i] === '--work-tree') otroRepo = true
         i += 2
       } else {
         if (/^--(git-dir|work-tree)=/.test(p[i])) otroRepo = true
+        const clave = p[i].match(/^--config-env=([\s\S]*)$/)?.[1] ?? ''
+        if (/^alias\./i.test(clave)) alias = true
+        if (CONFIG_DEL_PUSH.test(clave)) configDelPush = true
         i += 1
       }
     }
@@ -2074,19 +2281,148 @@ function* pushes(comando, cwd, shell = 'bash') {
       continue
     }
     if (p[i] !== 'push') {
+      // Lo que cambia, para los pushes que siguen, a donde van.
+      if (cambiaLaConfigDelPush(p[i], p.slice(i + 1))) configCambiada = true
+      const deja = ramaQueDeja(p[i], p.slice(i + 1))
+      if (deja) cambioDeRama = deja
       // `git send-pack <remoto> <ref>...` es la forma interna de `git push`: se lee
       // igual, y se pregunta si no toca main.
       if (p[i] === 'send-pack') yield evaluable({ dir, args: p.slice(i + 1), incierto: 'usa `git send-pack`, la forma interna de `git push`', duda, alternativa })
-      // `git -c alias.p=push p origin main`: el subcomando real no se ve.
-      else if (alias) yield evaluable({ dir, args: [], incierto: 'usa un alias de git definido en la misma linea', duda, alternativa })
+      // `git -c alias.p=push p origin main`, `git config alias.p push && git p
+      // origin main`: el subcomando real no se ve.
+      else if (alias || aliasEnElComando) yield evaluable({ dir, args: [], incierto: 'usa un alias de git definido en el mismo comando', duda, alternativa })
       // `git $SUB origin main`, `git {push,} ...`: el subcomando sale de una
       // expansion, y puede ser `push` si el comando habla de uno (sin eso, `for c
       // in status log; do git $c; done` no tiene por que preguntar).
-      else if (p[i] != null && (/[$`{}*?[\\]/.test(p[i]) || EXPRESION.test(p[i]) || p[i] === EXPRESION_SIN_LEER) && /push|send-pack/i.test(comando)) yield evaluable({ dir, args: p.slice(i + 1), incierto: `el subcomando de git (\`${p[i]}\`) se resuelve recien al ejecutar`, duda, alternativa })
+      else if (p[i] != null && (/[$`{}*?[\\]/.test(p[i]) || EXPRESION.test(p[i]) || p[i] === EXPRESION_SIN_LEER || (shell === 'powershell' && /^@/.test(p[i]))) && hablaDePush) yield evaluable({ dir, args: p.slice(i + 1), incierto: `el subcomando de git (\`${p[i]}\`) se resuelve recien al ejecutar`, duda, alternativa })
       continue
     }
     yield evaluable({ dir, args: p.slice(i + 1), incierto: viaXargs ? 'sus argumentos llegan por xargs' : null, duda, alternativa })
   }
+}
+
+// Lo que cambia la carpeta, o el `cd` mismo, de una forma que este hook no sigue.
+const SIN_MODELO = [
+  [/\btrap\b[^;\n]*\b(cd|pushd|popd|source|eval)\b/, 'un `trap` cuya accion cambia de carpeta puede correr en cualquier momento'],
+  [/\b(chpwd|precmd|preexec|zshexit|periodic|zshaddhistory|TRAP[A-Z]+|command_not_found_handler?)\b/, 'una funcion que el shell corre solo (`chpwd`, `TRAPEXIT`, `command_not_found_handler`...)'],
+  [/\b(auto_?pushd|pushd_?(ignore_?dups|minus|silent|to_?home)|cdable_?vars|auto_?cd|chase_?(links|dots)|posix_?cd)\b|\bset\s+-[a-zA-Z]*P\b|\bset\s+-o\s+physical\b/i, 'una opcion del shell que cambia como se mueven `cd` y `pushd`'],
+  [/(^|[;&|({\n])\s*(builtin\s+)?(disable|enable\s+-n|unhash)\s/, 'deshabilita comandos o funciones del shell'],
+  [/\b(functions|builtins|aliases|galiases|dirstack|DIRSTACK|cdpath|CDPATH)(\[[^\]]*\])?\+?=|\bOLDPWD\b/, 'cambia la pila de carpetas, la carpeta anterior, `cdpath` o una tabla del shell'],
+  [/(^|[;&|({\n])\s*(function\s*)?\(\s*\)\s*\{|(^|[;&|({\n])\s*function\s*\{|\bfunction\s+[^\s(){};&|]+\s+[^\s(){};&|]+\s*(\(\s*\)\s*)?\{/, 'una funcion anonima de zsh, o una definicion de varias funciones a la vez'],
+  [/\b(ZDOTDIR|BASH_ENV|ENV)=|\.(zshenv|zshrc|zprofile|zlogin|bashrc|bash_profile|bash_login|profile)\b/, 'un archivo de inicio que otro shell lee antes del comando'],
+  [/\bchmod\s+(-\S+\s+)*([0-7]?[0246][0-7]{2}\b|\S*-\S*x)|\bmkdir\b[^;&|\n]*\s(-m|--mode)\b|\bln\s+(-\S+\s+)*-[a-zA-Z]*s/, 'cambia permisos de carpetas o crea enlaces simbolicos'],
+]
+
+// Comandos que nombran un `git push` sin correrlo: lo imprimen, lo buscan o lo
+// guardan como texto. Y los subcomandos de git que no corren otros comandos
+// (`git commit -m "... git push ..."` es texto).
+const SOLO_LO_NOMBRAN = /^(echo|printf|print|cat|less|more|head|tail|wc|grep|egrep|fgrep|rg|ag|ack|gh|man|help|type|which|whence|true|false|:|test|\[|\[\[)$/
+const SUBCOMANDOS_DE_TEXTO = new Set(['commit', 'tag', 'log', 'show', 'notes', 'grep', 'stash', 'diff', 'blame', 'status', 'add', 'rm', 'mv', 'restore', 'reset', 'fetch', 'pull', 'merge', 'cherry-pick', 'revert', 'describe', 'shortlog', 'reflog', 'ls-files', 'ls-remote', 'rev-parse', 'rev-list', 'clone', 'init', 'remote', 'branch', 'checkout', 'switch', 'help', 'version', 'config'])
+// Algo que corre codigo aunque el comando solo imprima: `*(e:'...')` y `${(e)x}`, de zsh.
+const CORRE_CODIGO = /\((e|\+)[:'"]|\$\{\([A-Za-z@:#%=~^]*e[A-Za-z@:#%=~^]*\)/
+// Una palabra que trae escrito un `git ... push` (dos busquedas sueltas: una
+// sola expresion con `git.*push` costaba el cuadrado del largo de la palabra).
+const traeUnPush = (w) => /\b(push|send-pack)\b/.test(w) && /\bgit\b/.test(w)
+
+// Donde empieza el subcomando del `git` que esta en `desde`, tras sus opciones
+// (`-C x`, `-c k=v`...).
+function indiceDelSubcomando(p, desde = 0) {
+  let i = desde + 1
+  while (i < p.length && p[i].startsWith('-')) i += ['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env', '--super-prefix'].includes(p[i]) ? 2 : 1
+  return i
+}
+const esUnPush = (p, desde = 0) => ES_GIT.test(p[desde] ?? '') && ['push', 'send-pack'].includes(p[indiceDelSubcomando(p, desde)])
+
+// Un push que no esta donde se lo busca. `{ desde }`: `git ... push` aparece mas
+// adelante, como palabras sueltas (`caffeinate -i git push`, `find . -exec git
+// push ... \;`, `exec -a x git push`), y se lee desde ahi. `{ incierto }`: el
+// programa sale de una variable, o un argumento trae un push escrito que el
+// programa puede correr (`perl -e`, `git rebase -x`).
+function pushDentroDe(p, hablaDePush, shell = 'bash') {
+  if (!p.length || esUnPush(p)) return null
+  const nombre = p[0]
+  const desde = ES_GIT.test(nombre) ? indiceDelSubcomando(p) : 0
+  const soloTexto = ES_GIT.test(nombre) ? SUBCOMANDOS_DE_TEXTO.has(p[desde]) : SOLO_LO_NOMBRAN.test(nombre)
+  if (soloTexto && !p.some((w) => CORRE_CODIGO.test(w))) return null
+  for (let k = desde + 1; k < p.length; k++) {
+    if (esUnPush(p, k)) {
+      const otraCarpeta = p.slice(0, k).some((w) => w === '-execdir' || w === 'foreach') ? `\`${nombre}\` lo corre en otra carpeta` : null
+      return { desde: k, otraCarpeta }
+    }
+  }
+  if (!hablaDePush) return null
+  // (En PowerShell una variable sola no corre nada, salvo con `&`: alli cuenta si
+  // lo que sigue nombra el push, como en `& $g push origin main`.)
+  const loNombra = shell !== 'powershell' || p.slice(1).some((w) => /\bpush\b|send-pack/i.test(w))
+  // (`$@` o `$1` como programa son los argumentos de una funcion, que se leen al
+  // llamarla; y un comodin suelto suele ser el patron de un `case`.)
+  const variable = /[$`]/.test(nombre) && !/^\$\{?[@*#0-9]/.test(nombre)
+  if (loNombra && (variable || EXPRESION.test(nombre) || /^\{.*,.*\}$/.test(nombre))) return { incierto: `el programa que corre (\`${nombre}\`) se resuelve recien al ejecutar, y el comando habla de un push` }
+  if (p.slice(desde + 1).some((w) => traeUnPush(w) || CORRE_CODIGO.test(w))) {
+    return { incierto: `\`${desde ? `git ${p[desde]}` : nombre}\` recibe un texto con un push adentro, y puede correrlo` }
+  }
+  return null
+}
+
+// `B=$(git branch --show-current) && git push origin "$B"`: una variable que se
+// asigna una sola vez con la rama actual, y que nada mas toca, es HEAD.
+function variablesDeLaRamaActual(comando) {
+  const nombres = new Set()
+  const asignacion = new RegExp(String.raw`(?:^|[\s;&|(])([A-Za-z_]\w*)=(["']?)(?:\$\(\s*${NOMBRE_DE_LA_RAMA_ACTUAL}\s*\)|` + '`\\s*' + NOMBRE_DE_LA_RAMA_ACTUAL + '\\s*`' + String.raw`)\2(?=$|[\s;&|)])`, 'g')
+  for (const m of comando.matchAll(asignacion)) nombres.add(m[1])
+  for (const nombre of nombres) {
+    let escrituras = 0
+    for (const m of comando.matchAll(new RegExp(String.raw`(\$\{|\$)?\b${nombre}\b(\})?`, 'g'))) {
+      if (!m[1]) escrituras++
+      else if (m[1] === '${' && !m[2]) escrituras = Infinity
+    }
+    if (escrituras !== 1) nombres.delete(nombre)
+  }
+  return nombres
+}
+
+// La rama en la que deja el repo un `git checkout`, `git switch` o `git branch
+// -m`: `{ nombre, creada }`, con nombre null si no se sabe (`-`, un commit
+// suelto, una expresion); o null si no cambia de rama (`git checkout -- x`).
+function ramaQueDeja(subcomando, args) {
+  const literal = (x) => (x == null || x === '-' || x.startsWith('-') || DINAMICO.test(x) || EXPRESION.test(x) ? null : x)
+  if (subcomando === 'switch' || subcomando === 'checkout') {
+    if (args.includes('--') || args.some((a) => /^(-p|--patch|--pathspec-from-file(=|$))/.test(a))) return null
+    if (args.includes('-')) return { nombre: null, creada: false }
+    const crea = args.findIndex((a) => /^(-[bBcC]|--create|--force-create|--orphan)$/.test(a))
+    if (crea !== -1) return { nombre: literal(args[crea + 1]), creada: true }
+    if (args.some((a) => a === '--detach' || (subcomando === 'switch' && a === '-d'))) return { nombre: null, creada: false }
+    const posicionales = args.filter((a) => !a.startsWith('-'))
+    if (posicionales.length !== 1 || (subcomando === 'checkout' && posicionales[0] === '.')) return null
+    return { nombre: literal(posicionales[0]), creada: false }
+  }
+  if (subcomando === 'branch' && args.some((a) => /^(-[mM]|--move)$/.test(a))) {
+    const posicionales = args.filter((a) => !a.startsWith('-'))
+    return posicionales.length === 1 ? { nombre: literal(posicionales[0]), creada: true } : posicionales.length === 2 ? { nombre: null, creada: false } : null
+  }
+  if (subcomando === 'bisect' && args[0] === 'start') return { nombre: null, creada: false }
+  return null
+}
+
+// Las claves de configuracion que deciden a donde va un push: el remoto y su
+// URL, las reescrituras de URL, el refspec por defecto, push.default, el
+// upstream de cada rama, y otro archivo de configuracion incluido.
+const CONFIG_DEL_PUSH = /^(remote|url|branch|push|include|includeif)\./i
+
+// Un `git config`, `git remote` o `git branch` que cambia esa configuracion.
+function cambiaLaConfigDelPush(subcomando, args) {
+  if (subcomando === 'remote') return ['add', 'set-url', 'rename', 'set-branches', 'set-head'].includes(args.find((a) => !a.startsWith('-')))
+  if (subcomando === 'branch' || subcomando === 'checkout' || subcomando === 'switch') return args.some((a) => /^(-u|-t|--set-upstream-to(=|$)|--track(=|$)|--unset-upstream$)/.test(a))
+  if (subcomando !== 'config') return false
+  if (args.some((a) => /^(-e|--edit|--add|--replace-all|--unset|--unset-all|--rename-section|--remove-section)$/.test(a)) || ['set', 'unset', 'edit', 'rename-section', 'remove-section'].includes(args[0])) {
+    return !args.some((a) => /^[A-Za-z][\w.-]*\.[\w.-]/.test(a)) || args.some((a) => CONFIG_DEL_PUSH.test(a))
+  }
+  const posicionales = []
+  for (let j = 0; j < args.length; j++) {
+    if (/^(-f|--file|--blob|--type|--default|--comment)$/.test(args[j])) j++
+    else if (!args[j].startsWith('-')) posicionales.push(args[j])
+  }
+  return posicionales.length >= 2 && CONFIG_DEL_PUSH.test(posicionales[0])
 }
 
 // Variables, sustituciones de comando y comodines: lo que el shell resuelve
@@ -2157,8 +2493,9 @@ function cabezasDe(args) {
 // y sus `cabezas`. Son todos, no solo el primero: `(cd <vault> && git push); git
 // push` sube tambien la rama del proyecto, y esa es la que lleva el check.
 function* pushesConCommits(comando, cwd, shell = 'bash') {
-  for (const { dir, args, duda, alternativa } of pushes(comando, cwd, shell)) {
-    const cabezas = cabezasDe(args)
+  for (const { dir, args, duda, alternativa, ramaActual } of pushes(comando, cwd, shell)) {
+    // (Tras `git checkout x`, HEAD es x.)
+    const cabezas = cabezasDe(args).map((cabeza) => (cabeza === 'HEAD' && ramaActual?.nombre ? ramaActual.nombre : cabeza))
     if (!cabezas.length) continue
     yield { dir, cabezas }
     // Si puede correr en otra carpeta que se conoce, tambien ahi.
@@ -2177,7 +2514,8 @@ const RAMA_ACTUAL = '@rama-actual'
 const UPSTREAM = '@upstream'
 const TODAS = '*'
 
-const ramaCorta = (ref) => ref.replace(/^refs\/heads\//, '')
+// (`heads/main` tambien es main: git lo encuentra en el remoto como refs/heads/main.)
+const ramaCorta = (ref) => ref.replace(/^(refs\/)?heads\//, '')
 
 // Ramas remotas que cada `git push` del comando escribiria o borraria, para la
 // proteccion de main: el lado destino de cada refspec (`dev:main`,
@@ -2190,7 +2528,14 @@ const ramaCorta = (ref) => ref.replace(/^refs\/heads\//, '')
 export function destinosDelPush(comando, cwd, shell = 'bash') {
   const salida = []
   const vistos = new Set()
-  for (const { dir, args, incierto: inciertoDelComando = null, duda = null, alternativa = null } of pushes(comando, cwd, shell)) {
+  const ramaActual = shell === 'bash' ? variablesDeLaRamaActual(comando) : new Set()
+  for (const { dir, args: todos, incierto: inciertoDelComando = null, duda = null, alternativa = null, configDelPush = false, ramaActual: otraRama = null } of pushes(comando, cwd, shell)) {
+    // En PowerShell, la llave o el parentesis que cierran el bloque no son un
+    // refspec. Y una variable que es la rama actual es HEAD.
+    const args = (shell === 'powershell' ? todos.filter((a, j) => !(j === todos.length - 1 && /^[)}]+$/.test(a))) : todos).map((a) => {
+      const variable = a.match(/^\$\{?([A-Za-z_]\w*)\}?$/)?.[1]
+      return variable && ramaActual.has(variable) ? 'HEAD' : a
+    })
     const posicionales = []
     const destinos = []
     let soloTags = false
@@ -2229,14 +2574,19 @@ export function destinosDelPush(comando, cwd, shell = 'bash') {
       : dinamico
         ? `"${dinamico}" se resuelve recien al ejecutar`
         : null
-    const incierto = inciertoDelComando ?? deLosArgumentos ?? duda
+    const remotoIncierto = configDelPush || (refspecs.length > 0 && (DINAMICO.test(posicionales[0]) || EXPRESION.test(posicionales[0])))
+    // Sin refspec, la rama que sube la decide la configuracion: si el mismo comando la cambia, no se sabe cual es.
+    const deLaConfig = configDelPush && refspecs.length === 0 && !destinos.length ? 'la configuracion de git que decide a donde sube (remoto, refspec, push.default, upstream) cambia en este mismo comando' : null
+    // Si el comando cambia de rama antes del push y no se sabe a cual, la rama actual no se sabe.
+    const deLaRama = otraRama && !otraRama.nombre && (refspecs.length === 0 || refspecs.some((r) => /^\+?(HEAD|@)(:|$)/.test(r))) ? 'este comando cambia de rama antes del push, y no se sabe a cual' : null
+    const incierto = inciertoDelComando ?? deLosArgumentos ?? deLaConfig ?? deLaRama ?? duda
     const forzado = pushForzado(args)
     // Sin refspec sube la rama actual, tambien cuando lo unico que no se puede
     // leer es el remoto (`git push $REMOTO`) o la carpeta. No cuando los
     // argumentos llegan por otro lado (xargs, un alias, un lanzador).
     if (refspecs.length === 0 && destinos.length === 0 && !soloTags && !inciertoDelComando) destinos.push(RAMA_ACTUAL, UPSTREAM)
     if (destinos.length || incierto || forzado) {
-      const push = { dir, remoto: posicionales[0] ?? null, destinos: [...new Set(destinos)], incierto, forzado, borra: [...new Set(borra)], dudaDeCarpeta: duda, carpetaAlternativa: alternativa }
+      const push = { dir, remoto: posicionales[0] ?? null, destinos: [...new Set(destinos)], incierto, forzado, borra: [...new Set(borra)], dudaDeCarpeta: duda, carpetaAlternativa: alternativa, ...(remotoIncierto && { remotoIncierto }), ...(otraRama?.nombre && { ramaActual: otraRama }) }
       // El cuerpo de una funcion se lee al definirla y otra vez al llamarla: el
       // mismo push, en la misma carpeta, cuenta una vez.
       const clave = JSON.stringify(push)
@@ -2398,19 +2748,30 @@ function ramasDestino(push, correr) {
   const ramas = new Set()
   const git = (args) => salidaDe(correr('git', args, { cwd: push.dir, timeout: 10_000 }))
   let actual = null
-  const ramaActual = () => (actual ??= git(['rev-parse', '--abbrev-ref', 'HEAD']))
+  const deGit = () => (actual ??= git(['rev-parse', '--abbrev-ref', 'HEAD']))
+  // Si el comando cambia antes a otra rama, la actual es esa. Si esa no existe
+  // ahora y el comando no la crea, `git checkout x` pudo ser de un archivo (y la
+  // rama no cambia) o crearla desde el remoto: valen las dos.
+  const ramasActuales = () => {
+    const otra = push.ramaActual?.nombre
+    if (!otra) return [deGit()]
+    if (push.ramaActual.creada) return [otra]
+    const existe = correr('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${otra}`], { cwd: push.dir, timeout: 10_000 }).status
+    return existe === 0 ? [otra] : [otra, deGit()]
+  }
+  const ramaActual = () => ramasActuales()[0]
   for (const destino of push.destinos) {
     if (destino === TODAS) {
       // --all/--mirror suben main si existe en local; si git no responde, se asume que si.
       const r = correr('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${RAMA_PROTEGIDA}`], { cwd: push.dir, timeout: 10_000 })
       if (r.status === 0 || r.status == null) ramas.add(RAMA_PROTEGIDA)
     } else if (destino === RAMA_ACTUAL) {
-      const rama = ramaActual()
-      if (rama && rama !== 'HEAD') ramas.add(rama)
+      for (const rama of ramasActuales()) if (rama && rama !== 'HEAD') ramas.add(rama)
     } else if (destino === UPSTREAM) {
-      const rama = ramaActual()
-      const merge = rama && rama !== 'HEAD' ? git(['config', '--get', `branch.${rama}.merge`]) : ''
-      if (merge) ramas.add(ramaCorta(merge))
+      for (const rama of ramasActuales()) {
+        const merge = rama && rama !== 'HEAD' ? git(['config', '--get', `branch.${rama}.merge`]) : ''
+        if (merge) ramas.add(ramaCorta(merge))
+      }
     } else {
       ramas.add(destino)
     }
@@ -2440,10 +2801,20 @@ export function repoCanonico(url) {
 
 // URL del remoto al que va el push: el nombrado en el comando (o una URL o ruta
 // escrita directo) o, sin nombrar, origin.
+// La URL a la que va el push: la del remoto (la de push, si tiene una propia), o
+// el remoto mismo si es una URL o la ruta de un repo que existe. Un nombre con
+// `/` que no es un remoto ni una carpeta no es nada: no se lo toma por una URL.
 function urlDelRemoto(push, correr) {
   const remoto = push.remoto ?? 'origin'
-  if (/[/\\:]/.test(remoto)) return remoto
-  return salidaDe(correr('git', ['remote', 'get-url', remoto], { cwd: push.dir, timeout: 10_000 })) || null
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(remoto) || (remoto.includes(':') && !/^[A-Za-z]:[\\/]/.test(remoto))) return remoto
+  const url = salidaDe(correr('git', ['remote', 'get-url', remoto], { cwd: push.dir, timeout: 10_000 }))
+  if (url) {
+    // Si tiene una URL propia para el push (`remote.<x>.pushurl`), el push va ahi.
+    const dePush = salidaDe(correr('git', ['remote', 'get-url', '--push', remoto], { cwd: push.dir, timeout: 10_000 }))
+    return dePush && repoCanonico(dePush) !== repoCanonico(url) ? dePush : url
+  }
+  const ruta = /[/\\]/.test(remoto) ? path.resolve(push.dir, rutaExpandida(remoto)) : null
+  return ruta && esCarpeta(ruta) ? ruta : null
 }
 
 // El push va al Vault si su carpeta (o la raiz de su repo) es una ruta
@@ -2497,8 +2868,10 @@ export function prePushMain({ push, correr, vault, enSolo = enModoSolo }) {
   if (!tocaMain && !push.incierto) return null
   // El Vault exime solo si la carpeta se pudo leer del comando. Si no (`cd "$X"
   // && git push ...`), que la carpeta evaluada sea el Vault no alcanza: un `main`
-  // escrito en el comando se deniega igual, y lo demas se pregunta.
-  const enElVault = esElVault({ push, raiz, correr, vault })
+  // escrito en el comando se deniega igual, y lo demas se pregunta. Lo mismo si
+  // el remoto no se puede leer o su configuracion cambia en el mismo comando
+  // (`git -c remote.origin.pushurl=... push origin main`): no se sabe a que repo va.
+  const enElVault = !push.remotoIncierto && esElVault({ push, raiz, correr, vault })
   if (enElVault && !push.dudaDeCarpeta) return null
   if (!tocaMain || (enElVault && !push.destinos.includes(RAMA_PROTEGIDA))) {
     return preguntar([
@@ -2556,7 +2929,7 @@ export function prePushBorrado({ push, correr, vault, enSolo = enModoSolo }) {
   if (!push.borra?.includes(RAMA_DE_INTEGRACION)) return null
   const raiz = raizDelRepo(push.dir, correr)
   if (raiz && enSolo(raiz)) return null
-  if (!push.dudaDeCarpeta && esElVault({ push, raiz, correr, vault })) return null
+  if (!push.dudaDeCarpeta && !push.remotoIncierto && esElVault({ push, raiz, correr, vault })) return null
   return preguntar([
     `reglas-pr: este push BORRA la rama \`${RAMA_DE_INTEGRACION}\` del remoto en ${raiz ?? push.dir}.`,
     `\`${RAMA_DE_INTEGRACION}\` es la rama de integracion: de ella nacen las ramas de trabajo y a ella apuntan los PR.`,
@@ -2574,12 +2947,18 @@ const MAX_PUSHES_EVALUADOS = 25
 // El hook esta registrado con 60 s (settings.json): la revision entera tiene que
 // terminar antes, con margen para responder.
 const PLAZO_DE_LA_REVISION = 45_000
+// El largo maximo de un comando que se lee (leer uno de 64 KB toma menos de un segundo).
+const LARGO_MAXIMO = 64 * 1024
 
 export function prePush({ push, raiz, correr }) {
   for (const cabeza of push.cabezas) {
     const args = [SCRIPT_CONFIABLE, '--grupo', 'secretos', '--sin-pushear']
+    // Una rama o un tag que el mismo comando crea antes del push (`git switch -c
+    // x && git push -u origin x`) todavia no existe: se revisa HEAD, de donde
+    // sale. Si git no responde, se pasa igual y el script lo dice.
+    const existe = cabeza.startsWith('--') || correr('git', ['rev-parse', '--verify', '--quiet', `${cabeza}^{commit}`], { cwd: raiz, timeout: 10_000 }).status !== 1
     // Con "=": una ref que empiece con "-" no puede leerse como otra opcion.
-    if (cabeza !== 'HEAD') args.push(`--cabeza=${cabeza}`)
+    if (cabeza !== 'HEAD' && existe) args.push(`--cabeza=${cabeza}`)
     const r = correr(process.execPath, args, { cwd: raiz, timeout: 30_000 })
     const fail = (r.stdout ?? '').split('\n').find((l) => l.startsWith('[FAIL] sin-secretos'))
     if (r.status === 1 && fail) {
@@ -2789,6 +3168,14 @@ export function procesar(entrada, correr = correrReal) {
   const shell = /powershell/i.test(entrada.tool_name ?? '') ? 'powershell' : 'bash'
 
   if (entrada.hook_event_name === 'PreToolUse') {
+    // Un comando mas largo que esto no se lee: hacerlo podria pasarse del plazo
+    // del hook, y un hook que no responde a tiempo no frena nada. Si habla de un
+    // push o de un PR, se pregunta.
+    if (comando.length > LARGO_MAXIMO) {
+      return /push|send-pack|\bgh\b/i.test(comando)
+        ? preguntar([`reglas-pr: este comando tiene ${comando.length} caracteres, mas de los ${LARGO_MAXIMO} que este hook revisa, y habla de un push o de un PR. Confirma con el usuario antes de seguir, o separalo en comandos mas chicos.`])
+        : null
+    }
     // Primero main: es la regla dura y no necesita el script. Despues secretos.
     const esDeny = (r) => r?.hookSpecificOutput?.permissionDecision === 'deny'
     const vault = configDelVault()
@@ -2917,8 +3304,13 @@ function main() {
         ? preguntar([`reglas-pr: error interno del hook al leer este comando (${motivo}); el push no se pudo revisar. Confirma con el usuario antes de seguir, o separa el comando en partes mas simples.`])
         : { systemMessage: `reglas-pr: error interno del hook (${motivo}); no se verifico nada.` }
   }
-  if (salida) process.stdout.write(JSON.stringify(salida))
-  process.exit(0)
+  // La respuesta sale entera antes de terminar: con `process.exit` justo despues
+  // de escribir, una de mas de 64 KB llegaba cortada (y no era JSON). Y el motivo
+  // se acota: rutas de miles de caracteres no le sirven a nadie.
+  const motivo = salida?.hookSpecificOutput?.permissionDecisionReason
+  if (typeof motivo === 'string' && motivo.length > 8000) salida.hookSpecificOutput.permissionDecisionReason = `${motivo.slice(0, 8000)}\n[... motivo recortado]`
+  if (salida) process.stdout.write(JSON.stringify(salida), () => process.exit(0))
+  else process.exit(0)
 }
 
 // Este archivo es el script que se esta ejecutando (y no un import desde los

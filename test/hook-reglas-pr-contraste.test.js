@@ -6,7 +6,7 @@ import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
-import { segmentos, piezasDe, palabras, comandoEfectivo, comandoAnidado, destinosDelPush } from '../templates/base/claude/hooks/reglas-pr.mjs'
+import { segmentos, piezasDe, palabras, comandoEfectivo, comandoAnidado, destinosDelPush, argumentosDelPush } from '../templates/base/claude/hooks/reglas-pr.mjs'
 
 // Sigue a hook-reglas-pr-evasion.test.js: mismas herramientas, en un archivo
 // aparte para que corra en paralelo con el.
@@ -680,6 +680,119 @@ test('hook real: lo que la cuarta lectura encontro que seguia pasando, ya no pas
   for (const comando of [`sync() { cd "${vault}" || return 1; git push origin main; }; sync`, `cd "${vault}" && git push origin main`]) {
     assert.equal(decision(dir, comando), null, comando)
   }
+})
+
+// --- Lo que encontro la quinta lectura ---------------------------------------
+//
+// Una quinta verificacion independiente hallo formas de git que el hook no leia
+// como las lee git (`heads/main`, `--al`, `-uo x`, la configuracion cambiada en
+// el mismo comando), pushes escondidos detras de otro programa y lecturas de
+// carpeta que bash y zsh hacen distinto. Y una que estaba desde el principio:
+// cambiar de rama en el mismo comando (`git checkout main && git push`) dejaba
+// pasar el push a main, porque la rama actual se lee antes de que el comando corra.
+
+test('argumentosDelPush: las opciones de `git push`, como las entiende git', () => {
+  assert.deepEqual(argumentosDelPush(['-uo', 'x', 'origin', 'main']), ['-u', '-o', 'x', 'origin', 'main'])
+  assert.deepEqual(argumentosDelPush(['-ou', 'origin', 'main']), ['-o', 'u', 'origin', 'main'])
+  assert.deepEqual(argumentosDelPush(['--al', 'origin']), ['--all', 'origin'])
+  assert.deepEqual(argumentosDelPush(['--mi', 'origin']), ['--mirror', 'origin'])
+  assert.deepEqual(argumentosDelPush(['--del', 'origin', 'main']), ['--delete', 'origin', 'main'])
+  // Lo ambiguo o lo que no existe queda como esta: con eso git no corre el push.
+  assert.deepEqual(argumentosDelPush(['--forc', 'origin', 'x']), ['--forc', 'origin', 'x'])
+  assert.deepEqual(argumentosDelPush(['-xz', 'origin']), ['-xz', 'origin'])
+})
+
+test('destinosDelPush: `heads/main` es main, y la configuracion cambiada en el mismo comando no se da por buena', () => {
+  const push = (comando) => destinosDelPush(comando, CWD)[0]
+  for (const comando of ['git push origin HEAD:heads/main', 'git push origin heads/main', 'git push origin :heads/main', 'git push -uo https://github.com/soutecdev/soubunker-vault.git origin main']) {
+    assert.ok(push(comando).destinos.includes('main'), comando)
+    assert.equal(push(comando).remoto, 'origin', comando)
+  }
+  assert.ok(push('git push --al origin').destinos.includes('*'))
+  for (const comando of ['git -c remote.origin.push=HEAD:main push origin', 'git config remote.origin.push HEAD:main && git push', 'git -c push.default=matching push origin']) {
+    assert.match(push(comando).incierto, /configuracion/, comando)
+  }
+  // Con el refspec escrito solo queda en duda a que repo va: eso no se pregunta,
+  // pero ya no puede eximir a un push a main por ser el Vault.
+  const fork = push('git remote add fork https://github.com/x/y.git && git push fork feat/M1-x')
+  assert.equal(fork.incierto, null)
+  assert.equal(fork.remotoIncierto, true)
+  assert.match(push('git config alias.p push && git p origin main').incierto, /alias/)
+})
+
+test('destinosDelPush: el push escondido detras de otro programa se ve, y lo que no se puede leer se pregunta', () => {
+  const pushes = (comando, shell) => destinosDelPush(comando, CWD, shell)
+  for (const comando of ['exec -a x git push origin main', 'env -u HOME git push origin main', 'caffeinate -i git push origin main', 'find . -maxdepth 0 -exec git push origin main \\;', 'eval -- git push origin main', '=git push origin main']) {
+    assert.ok(pushes(comando).some((p) => p.destinos.includes('main')), comando)
+  }
+  for (const comando of ['G=git; $G push origin main', "x='git push origin main'; $x", 'perl -e \'system("git push origin main")\'', "git rebase --root -x 'git push origin HEAD:main'"]) {
+    assert.ok(pushes(comando).some((p) => p.incierto), comando)
+  }
+  // Lo que solo nombra el push no pregunta.
+  for (const comando of ['echo git push origin main', 'git commit -m "docs: como hacer git push"', 'grep -rn "git push" docs']) {
+    assert.deepEqual(pushes(comando), [], comando)
+  }
+  // PowerShell: `-EncodedCommand` se decodifica; un alias o una llamada con `&` se preguntan.
+  const codificado = Buffer.from('git push origin main', 'utf16le').toString('base64')
+  assert.ok(pushes(`pwsh -EncodedCommand ${codificado}`).some((p) => p.destinos.includes('main')))
+  for (const comando of ['Set-Alias g git; g push origin main', '& (Get-Command git) push origin main', "$g = 'git'; & $g push origin main"]) {
+    assert.ok(pushes(comando, 'powershell').some((p) => p.incierto), comando)
+  }
+  assert.ok(!pushes('if ($true) { git push origin fix/M1-algo }', 'powershell').some((p) => p.incierto), 'una condicion de PowerShell no es un programa')
+})
+
+test('carpeta del push: un `&&` al final de la linea sigue en la siguiente, y otras formas de la quinta lectura', () => {
+  const push = (comando) => destinosDelPush(comando, CWD).at(-1)
+  const otro = path.resolve(CWD, 'otro')
+  // La lista sigue tras el salto: el `cd` corre solo si lo de antes salio bien.
+  assert.equal(push('npm test &&\n  cd otro &&\n  git push origin x').dir, otro)
+  for (const comando of ['false &&\ncd otro\ngit push origin x', 'false && # comentario\n\ncd otro\ngit push origin x']) {
+    assert.deepEqual(new Set([push(comando).dir, push(comando).carpetaAlternativa]), new Set([CWD, otro]), comando)
+  }
+  // `#` tras cerrar un subshell es un comentario.
+  assert.equal(push('(true)#; cd otro\ngit push origin x').dir, CWD)
+  // `cd --foo x` falla en los dos shells; `cd x/no-existe/..` tambien.
+  assert.equal(push('cd --foo otro; git push origin x').dir, CWD)
+  assert.match(push('cd otro/no-existe/..; git push origin x').dudaDeCarpeta, /no existe/)
+  // `~-`, `~1` y un `cd -P` con `..` no se resuelven del texto.
+  for (const comando of ['cd ~-; git push origin x', 'cd otro; cd ~1; git push origin x', 'cd otro && cd -P ..; git push origin x']) {
+    assert.notEqual(push(comando).dudaDeCarpeta, null, comando)
+  }
+  // Lo que este hook no sigue deja en duda la carpeta de todos los pushes.
+  for (const comando of ["trap 'cd otro' DEBUG; git push origin x", 'chpwd() { :; }; cd otro; git push origin x', 'setopt autopushd; cd otro; popd; git push origin x', 'disable cd; cd otro; git push origin x', 'read -r OLDPWD <<< otro; cd -; git push origin x', "ZDOTDIR=x zsh -c 'git push origin x'", 'cd otro; {cd,} ..; git push origin x']) {
+    assert.notEqual(push(comando).dudaDeCarpeta, null, comando)
+  }
+})
+
+test('hook real: cambiar de rama en el mismo comando, y la rama que el comando crea antes del push', () => {
+  const dir = proyecto()
+  for (const comando of ['git checkout main && git push', 'git switch main && git merge fix/M1-algo && git push', 'git checkout main && git push origin HEAD', 'git branch -M main && git push -u origin main']) {
+    assert.equal(decision(dir, comando)?.tipo, 'deny', comando)
+  }
+  for (const comando of ['git checkout -b feat/M9-x && git push -u origin HEAD', 'git checkout main && git pull && git checkout fix/M1-algo && git merge main && git push', 'git checkout main -- README.md && git push']) {
+    assert.equal(decision(dir, comando), null, comando)
+  }
+  assert.equal(decision(dir, 'git checkout - && git push')?.tipo, 'ask')
+  // Una rama o un tag que el comando crea antes del push se revisa igual por
+  // secretos (antes pasaba con un aviso de que no se pudo validar).
+  const conSecreto = proyecto({ conReglas: true })
+  fs.writeFileSync(path.join(conSecreto, '.env'), 'CLAVE=valor\n')
+  git(conSecreto, 'add', '-f', '.env')
+  git(conSecreto, 'commit', '-q', '-m', 'chore: config')
+  for (const comando of ['git switch -c feat/M4-login && git push -u origin feat/M4-login', 'git tag -a v1.2.0 -m x && git push origin v1.2.0']) {
+    const d = decision(conSecreto, comando)
+    assert.equal(d?.tipo, 'deny', comando)
+    assert.match(d.motivo, /SHS-M39/, comando)
+  }
+})
+
+test('hook real: un comando enorme que habla de un push se pregunta sin leerlo, y la respuesta llega entera', () => {
+  const dir = proyecto()
+  assert.equal(decision(dir, `${'echo x; '.repeat(9000)}git push origin main`)?.tipo, 'ask')
+  assert.equal(decision(dir, `${'echo x; '.repeat(9000)}ls`), null)
+  // Un motivo largo (una ruta de miles de caracteres) sale recortado y como JSON valido.
+  const largo = decision(dir, `cd ${'a/'.repeat(3000)}..; git push origin main`)
+  assert.ok(largo === null || largo.motivo.length < 9000)
 })
 
 // --- El hook real, como lo corre Claude Code ------------------------------------

@@ -185,6 +185,47 @@ versión, ajustar a él el `to` de las dos migraciones nuevas y regenerar
 - **Un error del hook al leer un push ya no lo deja pasar**: si la lectura
   falla, se pregunta (unos mil `eval` encadenados agotaban la pila del lector,
   y el push pasaba sin revisar). Los `eval` encadenados tienen su propio tope.
+- **Cambiar de rama en el mismo comando ya no esquiva la protección de
+  `main`.** El hook leía la rama actual antes de que el comando corriera, así
+  que `git checkout main && git push` o `git switch main && git merge … && git
+  push` subían `main` sin que nada los frenara (pasaba desde la primera versión
+  del hook). Ahora sigue `git checkout`, `git switch` y `git branch -m` del
+  mismo comando; si no se sabe a qué rama cambia (`git checkout -`, `gh pr
+  checkout`), pregunta.
+- **El check de secretos revisa también la rama o el tag que el mismo comando
+  crea** (`git switch -c x && git push -u origin x`, `git tag v1 && git push
+  origin v1`): antes no existían al revisar, y el push pasaba con un aviso de
+  que no se pudo validar.
+- **El hook lee las opciones de `git push` como git**: `heads/main` y
+  `HEAD:heads/main` son `main`; `--al`, `--mi` y `--del` son `--all`,
+  `--mirror` y `--delete`; en `-uo x`, `x` es el valor de `-o`. Si el mismo
+  comando cambia la configuración que decide adónde va el push (`-c
+  remote.origin.push=…`, `-c push.default=matching`, `git config remote…`, `git
+  remote add`, `GIT_CONFIG_*`), un push sin refspec se pregunta y uno a `main`
+  ya no pasa por ser del Vault. Un remoto con `/` en el nombre ya no se toma por
+  la URL del Vault, y cuenta la URL de push (`pushurl`) del remoto.
+- **Un push escondido detrás de otro programa se ve o se pregunta**:
+  `caffeinate`, `exec -a`, `env -u`, `find -exec`, `script`, `eval --` y el
+  `=git` de zsh se leen desde el `git`; un programa que sale de una variable
+  (`$G push`, `"${arr[@]}"`), un argumento con un `git push` escrito que el
+  programa puede correr (`perl -e`, `git rebase -x`) y un alias de git definido
+  en el mismo comando se preguntan. En PowerShell, `-EncodedCommand` se
+  decodifica y se preguntan los alias, `& $x`, `& (…)` y los bloques armados
+  como texto.
+- **Más formas de mover la carpeta que bash y zsh leen distinto**: un `&&`,
+  `||` o `|` al final de la línea sigue en la siguiente (también tras una línea
+  en blanco o un comentario); `#` tras cerrar un subshell es un comentario;
+  `cd --foo x` y `cd x/no-existe/..` fallan; `~-`, `~1` y `cd -P` con `..` no
+  se resuelven del texto; `mkdir` sin `-p` no crea las carpetas de arriba. Lo
+  que el hook no sigue —un `trap` que cambia de carpeta, las funciones que el
+  shell corre solo (`chpwd`, `TRAPEXIT`…), opciones como `autopushd`, `disable
+  cd`, `OLDPWD`, `DIRSTACK`, `cdpath`, los archivos de inicio de otro shell, o
+  permisos y enlaces simbólicos creados en el mismo comando— deja la carpeta en
+  duda: el push a `main` se deniega y el resto se pregunta.
+- **Un comando de más de 64 KB que habla de un push o de un PR se pregunta sin
+  leerlo** (leer uno de 500 KB podía pasarse del plazo del hook), y la respuesta
+  del hook ya no se corta: una de más de 64 KB llegaba truncada y dejaba de ser
+  JSON.
 - **Skill `soutec-md-a-pdf`**: del HTML crudo del Markdown solo pasa el marcado
   conocido, y el `href` de un enlace va escapado (antes, un `href` con comillas
   cerraba la etiqueta e inyectaba otra, p. ej. un `<img src="file://…">`). El
