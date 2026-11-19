@@ -83,18 +83,23 @@ const CIERRA = new Set([')', '`)'])
 // El heredoc que abre un `<<` (`j` es la posicion que le sigue): su
 // delimitador, si lleva `-` (el cierre puede ir sangrado con tabuladores) y si
 // es `literal` -- con el delimitador entre comillas (`<<'EOF'`) el cuerpo no se
-// expande --, o null si lo que sigue no es un delimitador.
+// expande --, o null si lo que sigue no es un delimitador que se pueda leer
+// igual que bash. Leerlo distinto seria saltar un cuerpo que no es el suyo: con
+// la duda (`<<EOF!`, `<<'EO'F`) no se salta nada.
 function heredocEn(comando, j) {
   const tabs = comando[j] === '-'
   if (tabs) j++
   while (comando[j] === ' ' || comando[j] === '\t') j++
   const c = comando[j]
+  const termina = (k) => k >= comando.length || /[\s;&|()<>]/.test(comando[k])
   if (c === "'" || c === '"') {
     const fin = comando.indexOf(c, j + 1)
-    return fin === -1 ? null : { delim: comando.slice(j + 1, fin), tabs, literal: true }
+    const delim = fin === -1 ? '' : comando.slice(j + 1, fin)
+    return fin !== -1 && termina(fin + 1) && !/[\n\\$`]/.test(delim) ? { delim, tabs, literal: true } : null
   }
-  const delim = comando.slice(c === '\\' ? j + 1 : j).match(/^[A-Za-z_][A-Za-z0-9_.-]*/)?.[0]
-  return delim ? { delim, tabs, literal: c === '\\' } : null
+  const desde = c === '\\' ? j + 1 : j
+  const delim = comando.slice(desde).match(/^[A-Za-z_][A-Za-z0-9_.-]*/)?.[0]
+  return delim && termina(desde + delim.length) ? { delim, tabs, literal: c === '\\' } : null
 }
 
 // Los cuerpos de los heredocs pendientes, que empiezan en `desde`: donde va
@@ -489,6 +494,7 @@ const PILA_MAXIMA = 256
 // el motivo, si eso no se sabe con certeza (`duda`), y entonces la otra carpeta
 // en la que puede estar, si se conoce (`alternativa`); el lugar anterior, para
 // `cd -`; y los que apilo `pushd`. Un lugar es { carpeta, duda, alternativa }.
+// `cambios` cuenta las veces que cambio.
 const lugarDe = (e) => ({ carpeta: e.carpeta, duda: e.duda, alternativa: e.alternativa })
 const copiaDe = (e) => ({ ...e, pila: [...e.pila] })
 const mismoLugar = (a, b) => a.carpeta === b.carpeta && a.duda === b.duda && a.pila.length === b.pila.length
@@ -498,14 +504,17 @@ const volverA = (e, otro) => Object.assign(e, otro, { pila: [...otro.pila] })
 // Un `cd` (o un `eval`) cambia la carpeta de lo que viene despues solo si corre
 // en el mismo proceso: no detras de un envoltorio que no es del shell (`nohup cd
 // x`), ni dentro de una tuberia (`cd x | tee log`), ni mandado al fondo (`cd x
-// &`). 'depende': el ultimo comando de una tuberia corre en el shell actual en
-// zsh y en un subshell en bash.
+// &`). 'depende': hay dos casos en los que bash y zsh hacen cosas distintas, y
+// el hook no sabe cual de los dos corre el comando. El ultimo comando de una
+// tuberia corre en el shell actual en zsh y en un subshell en bash; y `command
+// cd x` corre el `cd` del shell en bash y el programa `cd` en zsh, que no
+// mueve nada.
 function correAca({ antes, despues, envoltorios, shell }) {
   if (!envoltorios.every((x) => ENVOLTORIOS_DEL_SHELL.has(x))) return 'no'
   if (despues === '&') return 'no'
   if (shell !== 'powershell' && despues === '|') return 'no'
   if (shell === 'cmd' && antes === '|') return 'no'
-  return shell === 'bash' && antes === '|' ? 'depende' : 'si'
+  return shell === 'bash' && (antes === '|' || envoltorios.includes('command')) ? 'depende' : 'si'
 }
 
 // Aplica un `cd`, `pushd` o `popd` al estado de carpeta `e`, y devuelve true si
@@ -519,12 +528,22 @@ function cambiarDeCarpeta(e, p, contexto) {
   const dudar = (motivo) => {
     e.duda = dudaDeCarpeta(motivo)
     e.alternativa = null
+    e.cambios++
     return true
   }
-  if (corre === 'depende') return dudar(`\`${nombre}\` cierra una tuberia, y que cambie o no la carpeta depende del shell`)
+  if (corre === 'depende') {
+    // Las dos carpetas posibles se conocen: donde se esta, y adonde lleva si corre aca.
+    const siCorre = copiaDe(e)
+    cambiarDeCarpeta(siCorre, p, { ...contexto, antes: ';', envoltorios: [] })
+    e.anterior = lugarDe(e)
+    dudar(`que \`${contexto.envoltorios.includes('command') ? 'command ' : ''}${nombre}\` cambie o no la carpeta depende del shell${contexto.antes === '|' ? ': cierra una tuberia' : ''}`)
+    e.alternativa = siCorre.duda ? null : siCorre.carpeta
+    return true
+  }
   const ir = (lugar) => {
     e.anterior = lugarDe(e)
     Object.assign(e, { alternativa: null }, lugar)
+    e.cambios++
     return true
   }
   // Cada comando corre en un shell nuevo: sin un pushd previo en el mismo
@@ -558,10 +577,49 @@ function cambiarDeCarpeta(e, p, contexto) {
     e.alternativa = enElProyecto(destino)
     return true
   }
+  // La carpeta no existe ahora. Si nada la crea antes en el mismo comando, este
+  // `cd` falla y lo que le sigue corre donde se estaba: `cd ../vualt; git add -A;
+  // git commit; git push`, con la ruta mal escrita, hace todo eso en el proyecto.
+  // Tras un `&&` no hay duda (si falla, lo que sigue no corre), ni tras un
+  // `|| exit 1`. En Windows, las rutas propias de Git Bash (`/tmp`) no se
+  // pueden comprobar.
+  const comprobable = !(process.platform === 'win32' && /^[\\/](?![\\/])/.test(expandida))
+  const siFallaNoSigue = contexto.despues === '&&' || (contexto.despues === '||' && contexto.saleSiFalla)
+  if (comprobable && !esCarpeta(ruta) && !siFallaNoSigue) {
+    e.anterior = lugarDe(e)
+    dudar(`\`${nombre} ${destino}\` puede fallar: esa carpeta no existe ahora`)
+    e.alternativa = ruta
+    return true
+  }
   // Una ruta absoluta deja en claro donde se esta; una relativa hereda la duda
   // (y mueve igual la carpeta alternativa).
   if (path.isAbsolute(expandida)) return ir({ carpeta: ruta, duda: null })
   return ir({ carpeta: ruta, duda: e.duda, alternativa: e.alternativa && path.resolve(e.alternativa, expandida) })
+}
+
+// Lo que sigue a un `||` (un comando, o unas llaves enteras) termina con `exit`
+// o `return`: si se llega ahi, lo de despues no corre.
+function saleElQueSigue(piezas, desde) {
+  let llaves = 0
+  for (let k = desde; k < piezas.length; k++) {
+    const crudas = piezas[k].crudas ?? []
+    if (!crudas.length) continue
+    const sinLlaves = crudas.filter((palabra) => palabra !== '{' && palabra !== '}')
+    llaves += crudas.filter((palabra) => palabra === '{').length - crudas.filter((palabra) => palabra === '}').length
+    if (/^(exit|return)$/.test(sinLlaves[0] ?? '')) return true
+    if (llaves <= 0) return false
+  }
+  return false
+}
+
+// Un `cd` literal a una carpeta que ahora no existe: puede fallar.
+function puedeFallar(e, p, shell) {
+  if (!ES_CD.test(p[0]) && !ES_PUSHD.test(p[0])) return false
+  const destino = p.slice(1).find((x) => !x.startsWith('-') && !(shell === 'cmd' && /^\/d$/i.test(x)))
+  if (destino == null) return false
+  const expandida = rutaExpandida(e.carpeta, destino)
+  if (process.platform === 'win32' && /^[\\/](?![\\/])/.test(expandida)) return false
+  return !DINAMICO_EN_RUTA.test(expandida) && !esCarpeta(path.resolve(e.carpeta, expandida))
 }
 
 // `$(git branch --show-current)` y sus equivalentes SI se pueden leer del
@@ -652,7 +710,7 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, p
     else if (CIERRA.has(pieza.corte) && abiertas.length) cierreDe.set(abiertas.pop(), k)
   })
 
-  let e = estado ?? { carpeta: cwd, duda: null, alternativa: null, anterior: null, pila: [] }
+  let e = estado ?? { carpeta: cwd, duda: null, alternativa: null, anterior: null, pila: [], cambios: 0 }
   const ambitos = []
   // Lo que puede no haber corrido y sigue abierto, con el estado al entrar.
   let regiones = []
@@ -666,7 +724,9 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, p
 
   const salirDe = (region) => {
     if (mismoLugar(e, region.estado)) return
-    const adentro = e.duda ? null : e.carpeta
+    // La otra carpeta posible se conoce solo si adentro hubo un unico cambio:
+    // con dos (`if a; then cd x; else cd y; fi`) pudo quedar en cualquiera.
+    const adentro = e.duda || e.cambios - region.estado.cambios !== 1 ? null : e.carpeta
     volverA(e, region.estado)
     if (e.duda) return
     e.duda = dudaDeCarpeta('un `cd` anterior corre solo si se cumple una condicion')
@@ -675,6 +735,18 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, p
   const cerrarHasta = (tipo) => {
     const i = regiones.findLastIndex((region) => region.tipo === tipo)
     if (i !== -1) for (const region of regiones.splice(i).reverse()) salirDe(region)
+  }
+  // Cierra un bloque de bash (`fi`, `done`, `esac`) o unas llaves. En una
+  // tuberia o al fondo, lo compuesto corre en un subshell: al terminar vuelve la
+  // carpeta de antes, sin dudas. Unas llaves a secas corren siempre y en este
+  // shell, y su `cd` queda; el cuerpo de una funcion y lo demas, puede no correr.
+  const cerrar = (tipos, corte) => {
+    const i = regiones.findLastIndex((region) => tipos.includes(region.tipo))
+    if (i === -1) return
+    const [region, ...adentro] = regiones.splice(i)
+    for (const otra of adentro.reverse()) salirDe(otra)
+    if (corte === '|' || corte === '&') volverA(e, region.estado)
+    else if (region.tipo !== 'grupo' || region.trasTuberia) salirDe(region)
   }
   const entrar = (tipo, extra = {}) => regiones.push({ tipo, estado: copiaDe(e), ...extra })
   // Lo que sigue a un `&&` o a un `||` corre solo si lo anterior salio de cierta manera.
@@ -692,15 +764,15 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, p
       if (shell === 'bash') {
         for (const palabra of estructuraDe(crudas)) {
           if (ABRE_BLOQUE.has(palabra)) entrar('bloque')
-          else if (CIERRA_BLOQUE.has(palabra)) cerrarHasta('bloque')
-          else if (palabra === '{' && esperaCuerpo) entrar('funcion', { llaves: 1 })
-          else if (palabra === '{' || palabra === '}') {
-            const funcion = regiones.findLast((region) => region.tipo === 'funcion')
-            if (funcion && (funcion.llaves += palabra === '{' ? 1 : -1) === 0) cerrarHasta('funcion')
+          else if (CIERRA_BLOQUE.has(palabra)) cerrar(['bloque'], pieza.corte)
+          else if (palabra === '}') cerrar(['funcion', 'grupo'], pieza.corte)
+          else if (palabra === '{') {
+            // Tras `x |`, que las llaves corran en este shell depende del shell.
+            entrar(esperaCuerpo ? 'funcion' : 'grupo', { trasTuberia: antes === '|' })
+            esperaCuerpo = false
           }
-          if (palabra === '{') esperaCuerpo = false
         }
-        if (crudas[0] === 'function' && crudas.includes('{')) entrar('funcion', { llaves: 1 })
+        if (crudas[0] === 'function' && crudas.includes('{')) entrar('funcion')
       } else if (shell === 'powershell') {
         const { abre, cierra } = llavesDe(crudas)
         if (llaves === 0 && abre > 0) entrar('llaves')
@@ -742,11 +814,16 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, p
 
       const { p, viaXargs, envoltorios } = leido
       const nombre = p[0] ?? ''
-      const contexto = { antes, despues, envoltorios, shell }
+      // `cd x || exit 1`, `cd x || { echo no; return 1; }`: si el cd falla, no sigue.
+      const saleSiFalla = despues === '||' && saleElQueSigue(piezas, k + 1)
+      const contexto = { antes, despues, envoltorios, shell, saleSiFalla }
       // Lo que sigue a `cd x ||` corre solo si ese cd fallo: en la carpeta de antes.
       const aqui = siFallo ?? e
       siFallo = null
       if (ES_CD.test(nombre) || ES_PUSHD.test(nombre) || ES_POPD.test(nombre)) {
+        // `cd x && a; b`: si ese cd puede fallar (la carpeta no existe), `a` corre
+        // solo si no fallo, y `b` corre igual: tambien es una lista condicional.
+        if (despues === '&&' && puedeFallar(e, p, shell) && regiones.at(-1)?.tipo !== 'lista') entrar('lista')
         entrarEnLista()
         const previo = despues === '||' ? copiaDe(e) : null
         if (cambiarDeCarpeta(e, p, contexto) && previo) siFallo = previo
@@ -771,6 +848,7 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, p
           if (comparte === 'depende' && !mismoLugar(adentro, aqui)) {
             e.duda = dudaDeCarpeta(`\`${nombre}\` cierra una tuberia, y que su \`cd\` quede o no depende del shell`)
             e.alternativa = null
+            e.cambios++
           }
         } else if (p.length) {
           yield { p, viaXargs, ...lugarDe(aqui) }
@@ -1225,7 +1303,11 @@ function preguntar(lineas) {
 // reglas da lo mismo en cual corre.
 function sinDudaEnElMismoRepo(push, correr) {
   if (!push.dudaDeCarpeta || !push.carpetaAlternativa) return push
-  const [aca, alla] = [raizDelRepo(push.dir, correr), raizDelRepo(push.carpetaAlternativa, correr)]
+  // Una carpeta que todavia no existe (`mkdir build; cd build`) es del repo en el
+  // que se la va a crear: se mira su ancestro mas cercano que exista.
+  let otra = push.carpetaAlternativa
+  while (!esCarpeta(otra) && path.dirname(otra) !== otra) otra = path.dirname(otra)
+  const [aca, alla] = [raizDelRepo(push.dir, correr), raizDelRepo(otra, correr)]
   if (!aca || !alla || !mismaCarpeta(aca, alla)) return push
   return { ...push, dudaDeCarpeta: null, carpetaAlternativa: null, incierto: push.incierto === push.dudaDeCarpeta ? null : push.incierto }
 }

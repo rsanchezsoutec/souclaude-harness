@@ -71,12 +71,15 @@ versión, ajustar a él el `to` de las dos migraciones nuevas y regenerar
   (`(cd x)`, `$(cd x)`) ni el que va detrás de un envoltorio que no es del shell
   (`nohup cd x`); `cd -`, `pushd`/`popd` y `Push-Location`/`Pop-Location` se
   siguen. Si la carpeta no se puede leer del comando (`cd "$DESTINO"`,
-  `git -C "$DIR"`), o si el `cd` puede no haber corrido (el de un `if`, un
-  bucle, el cuerpo de una función o lo que sigue a un `&&`), el hook lo evalúa
-  donde está y **pregunta**, o deniega si ahí toca `main`. No pregunta si las
-  dos carpetas posibles son del mismo repo (`cd src && npm test && cd ..; git
-  push`); `~`, `$HOME`, `$PWD` y `$(git rev-parse --show-toplevel)` sí se
-  resuelven. Un comando cortado por una expresión se lee entero: en `git push
+  `git -C "$DIR"`), si el `cd` puede no haber corrido (el de un `if`, un bucle,
+  el cuerpo de una función o lo que sigue a un `&&`) o si depende del shell
+  (`command cd x` no cambia de carpeta en zsh), el hook lo evalúa donde está y
+  **pregunta**, o deniega si ahí toca `main`. Lo mismo si la carpeta no existe:
+  ese `cd` falla, y con la ruta del Vault mal escrita `cd ../vualt; git add -A;
+  git commit -m …; git push` hacía todo eso en el proyecto, sin revisar. No
+  pregunta si las dos carpetas posibles son del mismo repo (`cd src && npm test
+  && cd ..; git push`); `~`, `$HOME`, `$PWD` y `$(git rev-parse
+  --show-toplevel)` sí se resuelven. Un comando cortado por una expresión se lee entero: en `git push
   $(echo origin) main`, `main` se ve y se deniega.
 - **El check de secretos del hook corre en cada repo al que el comando pushea**,
   no solo en el primero: en `git -C <vault> push origin main; git push`, el push
