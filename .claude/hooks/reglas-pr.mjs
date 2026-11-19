@@ -9,10 +9,11 @@
 //                                          este en modo solo; (2) grupo secretos
 //                                          sobre los commits que el push subiria;
 //                                          si falla, deniega el push; (3) pregunta
-//                                          al usuario (`ask`) si el destino no se
-//                                          puede leer del comando (variables,
-//                                          xargs, alias) o si el push es forzado
-//                                          (esto ultimo, solo en modo equipo).
+//                                          al usuario (`ask`) si el destino o la
+//                                          carpeta del push no se pueden leer
+//                                          del comando (variables, xargs, alias)
+//                                          o si el push es forzado (esto ultimo,
+//                                          solo en modo equipo).
 //   PostToolUse · gh pr create / edit   -> los tres grupos contra el PR, un
 //                                          comentario con el resultado en el PR
 //                                          (la evidencia para el revisor) y el
@@ -35,10 +36,14 @@
 //
 // Limite: el hook lee el TEXTO del comando. Ve el push a traves de envoltorios
 // (`command git push`), agrupaciones (`(git push)`), comandos anidados (`bash
-// -c`, `eval`) y lanzadores (`start`, `Start-Process`), pero no el que hace un
-// script (`./deploy.sh`), otro programa (`make`, `python -c`), un alias
-// configurado en git o una llamada a la API (`gh api`). Es una red para el
-// error honesto; la barrera de `main` es la proteccion de rama en GitHub.
+// -c`, `eval`) y lanzadores (`start`, `Start-Process`), y sigue los `cd` que
+// de verdad cambian la carpeta de lo que viene despues (no el de un subshell,
+// una tuberia o `nohup cd`); si no puede saber en que carpeta corre el push,
+// pregunta. No ve el push que hace un script (`./deploy.sh`), otro programa
+// (`make`, `python -c`), un alias configurado en git, una llamada a la API
+// (`gh api`) ni lo que va dentro de una sustitucion entre comillas dobles
+// (`"$(git push)"`). Es una red para el error honesto; la barrera de `main` es
+// la proteccion de rama en GitHub.
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -61,58 +66,79 @@ const GRUPOS = [
 // --- Lectura del comando ---------------------------------------------------
 
 // Parte un comando de shell por sus operadores de control (&&, ||, |, ;, &,
-// saltos de linea) y por los parentesis de un subshell o de una sustitucion de
-// comando -- `(git push)`, `$(git push)` --, sin cortar dentro de comillas:
-// `git commit -m "x; git push"` es un solo segmento. Las redirecciones (2>&1,
-// &>) no son operadores.
+// saltos de linea), por los parentesis de un subshell o de una sustitucion de
+// comando -- `(git push)`, `$(git push)` -- y, en bash, por los backticks, sin
+// cortar dentro de comillas: `git commit -m "x; git push"` es un solo segmento.
+// Las redirecciones (2>&1, &>) no son operadores.
 export function segmentos(comando, shell = 'bash') {
-  return segmentosConCorte(comando, shell).map((s) => s.texto)
+  return piezasDe(comando, shell)
+    .map((pieza) => pieza.texto.trim())
+    .filter(Boolean)
 }
 
-// Lo mismo, con el dato de como termino cada segmento. `abre` = lo corto un
-// parentesis de apertura: lo que sigue (`git push origin (Get-Content rama.txt)`
-// en PowerShell, `git push origin $(...)` en bash) es una expresion cuyo
-// resultado completa los argumentos, y no se puede leer del texto.
-export function segmentosConCorte(comando, shell = 'bash') {
+const ABRE = new Set(['(', '`('])
+const CIERRA = new Set([')', '`)'])
+
+// Lo mismo, pieza por pieza y sin descartar las vacias: el texto tal cual
+// (`desde` y `hasta` son su posicion en el comando) y `corte`, el operador que
+// la termino. Un salto de linea cuenta como `;`. `(` y `)` abren y cierran una
+// expresion, y en bash un par de backticks tambien (`\`(` y `\`)`). `shell` es
+// 'bash' (y los que se le parecen), 'powershell' o 'cmd'; en cmd un `&` suelto
+// no manda nada al fondo: separa comandos que corren uno tras otro, como `;`.
+export function piezasDe(comando, shell = 'bash') {
   const escape = shell === 'powershell' ? '`' : '\\'
-  const salida = []
-  let actual = ''
+  const piezas = []
+  let desde = 0
   let comilla = null
+  let enBackticks = false
+  const cortar = (hasta, corte, largo = 1) => {
+    piezas.push({ texto: comando.slice(desde, hasta), desde, hasta, corte })
+    desde = hasta + largo
+  }
   for (let i = 0; i < comando.length; i++) {
     const c = comando[i]
     if (comilla) {
-      actual += c
-      if (c === escape && comilla === '"' && i + 1 < comando.length) actual += comando[++i]
+      if (c === escape && comilla === '"' && i + 1 < comando.length) i++
       else if (c === comilla) comilla = null
       continue
     }
     if (c === "'" || c === '"') {
       comilla = c
-      actual += c
     } else if (c === escape && i + 1 < comando.length) {
-      actual += c + comando[++i]
-    } else if (c === '&' && (/[<>]$/.test(actual) || comando[i + 1] === '>')) {
-      actual += c
-    } else if (c === ';' || c === '\n' || c === '\r' || c === '&' || c === '|' || c === '(' || c === ')') {
-      if ((c === '&' || c === '|') && comando[i + 1] === c) i++
-      salida.push({ texto: actual, abre: c === '(' })
-      actual = ''
-    } else {
-      actual += c
+      i++
+    } else if (c === '&' && ((i > desde && /[<>]/.test(comando[i - 1])) || comando[i + 1] === '>')) {
+      // 2>&1, &>: una redireccion, no un operador.
+    } else if (c === '`' && shell === 'bash') {
+      cortar(i, enBackticks ? '`)' : '`(')
+      enBackticks = !enBackticks
+    } else if (c === '(' || c === ')') {
+      cortar(i, c)
+    } else if (c === ';' || c === '\n' || c === '\r') {
+      cortar(i, ';')
+    } else if (c === '&' || c === '|') {
+      // `&&` y `||` son un solo operador; `|&` es una tuberia (con stderr).
+      const largo = comando[i + 1] === c || (c === '|' && comando[i + 1] === '&') ? 2 : 1
+      const corte = comando[i + 1] === c ? c + c : c === '&' && shell === 'cmd' ? ';' : c
+      cortar(i, corte, largo)
+      i += largo - 1
     }
   }
-  salida.push({ texto: actual, abre: false })
-  return salida.map((s) => ({ texto: s.texto.trim(), abre: s.abre })).filter((s) => s.texto)
+  cortar(comando.length, '')
+  return piezas
 }
 
 // Palabras de un segmento, sin comillas. Descarta las redirecciones (2>&1,
-// > archivo) y las asignaciones iniciales (VAR=valor git push).
+// > archivo) y las asignaciones iniciales (VAR=valor git push). Una expresion
+// entre parentesis o entre backticks (`$(cat rama.txt)`) queda entera dentro de
+// su palabra: sus espacios no separan.
 export function palabras(segmento, shell = 'bash') {
   const escape = shell === 'powershell' ? '`' : '\\'
   const crudas = []
   let actual = ''
   let hay = false
   let comilla = null
+  let profundidad = 0
+  let enBackticks = false
   for (let i = 0; i < segmento.length; i++) {
     const c = segmento[i]
     if (comilla) {
@@ -131,11 +157,14 @@ export function palabras(segmento, shell = 'bash') {
     } else if (c === escape && i + 1 < segmento.length) {
       actual += segmento[++i]
       hay = true
-    } else if (/\s/.test(c)) {
+    } else if (/\s/.test(c) && profundidad === 0 && !enBackticks) {
       if (hay) crudas.push(actual)
       actual = ''
       hay = false
     } else {
+      if (c === '(') profundidad++
+      else if (c === ')' && profundidad > 0) profundidad--
+      else if (c === '`' && shell === 'bash') enBackticks = !enBackticks
       actual += c
       hay = true
     }
@@ -152,22 +181,15 @@ export function palabras(segmento, shell = 'bash') {
     sinRedireccion.push(crudas[i])
   }
   let desde = 0
-  while (desde < sinRedireccion.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(sinRedireccion[desde])) {
-    // VAR=`comando ...`: lo que sigue al = no es un valor, es un comando que se
-    // ejecuta. Se conserva (sin el nombre de la variable) como inicio del segmento.
-    const valor = sinRedireccion[desde].replace(/^[A-Za-z_][A-Za-z0-9_]*=/, '')
-    if (valor.startsWith('`')) {
-      sinRedireccion[desde] = valor
-      break
-    }
-    desde++
-  }
+  while (desde < sinRedireccion.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(sinRedireccion[desde])) desde++
   return sinRedireccion.slice(desde)
 }
 
 const ES_GIT = /(^|[\\/])git(\.exe)?$/i
 const ES_GH = /(^|[\\/])gh(\.exe)?$/i
-const ES_CD = /^(cd|pushd|chdir|set-location|sl)$/i
+const ES_CD = /^(cd|chdir|set-location|sl)$/i
+const ES_PUSHD = /^(pushd|push-location)$/i
+const ES_POPD = /^(popd|pop-location)$/i
 const ES_SHELL = /(^|[\\/])(ba|z|da|k|a)?sh(\.exe)?$/i
 const ES_POWERSHELL = /(^|[\\/])(powershell|pwsh)(\.exe)?$/i
 const ES_CMD = /(^|[\\/])cmd(\.exe)?$/i
@@ -188,14 +210,20 @@ const REFSPEC_MATCHING = /^\+?:$/
 // regla allow `Bash(git push:*)`, ese push pasaba sin pregunta Y sin que este
 // hook lo viera. Las palabras de control son las de un if/while/grupo de shell.
 const ENVOLTORIOS = new Set(['command', 'builtin', 'exec', 'time', 'nice', 'nohup', 'stdbuf', 'timeout', 'noglob', 'env', 'sudo', 'doas', 'xargs'])
+// De esos, los que son del propio shell: lo que envuelven corre en el mismo
+// proceso. Un `cd` detras de cualquier otro (`nohup cd x`, `env cd x`) corre en
+// un proceso aparte y no mueve la carpeta de lo que sigue.
+const ENVOLTORIOS_DEL_SHELL = new Set(['command', 'builtin', 'time', 'noglob'])
 const PALABRAS_DE_CONTROL = new Set(['then', 'do', 'else', 'elif', 'if', 'while', 'until', '!', '{', '}'])
 const PROFUNDIDAD_MAXIMA = 4
 
 // El comando que un segmento ejecuta de verdad, sin lo que lo envuelve.
 // `viaXargs`: sus argumentos llegan por stdin y no se pueden leer del texto.
+// `envoltorios`: los que se le quitaron, en orden.
 export function comandoEfectivo(palabrasDelSegmento) {
   let p = [...palabrasDelSegmento]
   let viaXargs = false
+  const envoltorios = []
   // `git push` entre backticks, o {git push} pegado a las llaves (PowerShell).
   const abre = p[0]?.match(/^[`{]+/)?.[0]
   if (abre) {
@@ -211,11 +239,12 @@ export function comandoEfectivo(palabrasDelSegmento) {
     const nombre = p[0].replace(/^.*[\\/]/, '').replace(/\.exe$/i, '').toLowerCase()
     if (!ENVOLTORIOS.has(nombre)) break
     if (nombre === 'xargs') viaXargs = true
+    envoltorios.push(nombre)
     p.shift()
     // Opciones del envoltorio, asignaciones de env y duraciones de timeout/nice.
     while (p.length && (p[0].startsWith('-') || /^[A-Za-z_][A-Za-z0-9_]*=/.test(p[0]) || /^\d+(\.\d+)?[smhd]?$/.test(p[0]))) p.shift()
   }
-  return { p, viaXargs }
+  return { p, viaXargs, envoltorios }
 }
 
 // Un comando escrito dentro de otro: `bash -c "..."`, `eval "..."`,
@@ -233,7 +262,7 @@ export function comandoAnidado(p, shell = 'bash') {
   }
   if (ES_CMD.test(primero)) {
     const i = p.findIndex((w, k) => k > 0 && /^\/[ck]$/i.test(w))
-    return i !== -1 && p[i + 1] != null ? { comando: p.slice(i + 1).join(' '), shell: 'bash' } : null
+    return i !== -1 && p[i + 1] != null ? { comando: p.slice(i + 1).join(' '), shell: 'cmd' } : null
   }
   return null
 }
@@ -263,53 +292,216 @@ export function rutaNativa(ruta, plataforma = process.platform) {
   return m ? `${m[1].toUpperCase()}:${m[2] ?? '/'}` : ruta
 }
 
-function carpetaTrasCd(actual, destino) {
-  if (!destino || destino === '-') return actual
-  const expandido = destino === '~' || destino.startsWith('~/') ? path.join(os.homedir(), destino.slice(1)) : rutaNativa(destino)
-  return path.resolve(actual, expandido)
+// Lo que el shell resuelve recien al ejecutar dentro de una ruta: variables y
+// sustituciones. Los comodines quedan fuera a proposito (`[` y `*` aparecen en
+// nombres de carpeta reales); `~`, `$HOME`, `$PWD` y `$(pwd)` si se pueden
+// resolver aca.
+const DINAMICO_EN_RUTA = /[$`]|%[A-Za-z_][A-Za-z0-9_]*%/
+const HOGAR = /^(\$HOME|\$\{HOME\}|\$env:USERPROFILE|\$env:HOME|%USERPROFILE%)(?=$|[\\/])/i
+const AQUI = /^(\$PWD|\$\{PWD\}|\$\(\s*pwd\s*\)|`\s*pwd\s*`|%CD%)(?=$|[\\/])/i
+
+function esCarpeta(ruta) {
+  try {
+    return fs.statSync(ruta).isDirectory()
+  } catch {
+    return false
+  }
 }
 
-// Cada `git push` del comando, con la carpeta efectiva en la que corre (el cwd
-// mas los cd y -C previos) y sus argumentos: sin `git`, sus opciones globales
-// ni `push`. Mira a traves de envoltorios (`command git push`), agrupaciones
-// (`(git push)`, `if ...; then git push; fi`) y comandos anidados (`bash -c`,
-// `eval`). `incierto` lleva el motivo cuando el texto no alcanza para saber que
-// se sube (xargs, un alias de git definido en la misma linea).
+function rutaExpandida(actual, destino) {
+  if (destino === '~' || /^~[\\/]/.test(destino)) return path.join(os.homedir(), destino.slice(1))
+  return rutaNativa(destino.replace(HOGAR, () => os.homedir()).replace(AQUI, () => actual))
+}
+
+// La carpeta a la que lleva `cd <destino>` (o `git -C <destino>`) desde
+// `actual`, o null si el destino sale de una variable o de una sustitucion y no
+// se puede leer del texto.
+function carpetaTrasCd(actual, destino) {
+  const expandida = rutaExpandida(actual, destino)
+  const ruta = path.resolve(actual, expandida)
+  return DINAMICO_EN_RUTA.test(expandida) && !esCarpeta(ruta) ? null : ruta
+}
+
+const dudaDeCarpeta = (motivo) => `no se sabe en que carpeta corre (${motivo})`
+
+// Aplica un `cd`, `pushd` o `popd` al estado de carpeta `e`, si de verdad
+// cambia la carpeta de lo que viene despues, y devuelve true si la cambio. No la
+// cambia el que corre en otro proceso: detras de un envoltorio que no es del
+// shell (`nohup cd x`), dentro de una tuberia (`cd x | tee log`) o mandado al
+// fondo (`cd x &`). Cuando no se puede saber, deja la carpeta como estaba y
+// anota el motivo en `e.duda`: prePushMain pregunta en vez de adivinar.
+function cambiarDeCarpeta(e, p, { antes, despues, envoltorios, shell }) {
+  const nombre = p[0]
+  if (!envoltorios.every((x) => ENVOLTORIOS_DEL_SHELL.has(x))) return false
+  if (despues === '&') return false
+  // En PowerShell una tuberia corre en el mismo proceso; en bash y en cmd, no.
+  if (shell !== 'powershell' && despues === '|') return false
+  if (shell === 'cmd' && antes === '|') return false
+  if (shell === 'bash' && antes === '|') {
+    // El ultimo comando de una tuberia corre en el shell actual en zsh y en un
+    // subshell en bash.
+    e.duda = dudaDeCarpeta(`\`${nombre}\` cierra una tuberia, y que cambie o no la carpeta depende del shell`)
+    return false
+  }
+  const mover = (nueva) => {
+    e.anterior = e.carpeta
+    e.carpeta = nueva
+    return true
+  }
+  // Cada comando corre en un shell nuevo: sin un pushd previo en el mismo
+  // comando, la pila esta vacia y `popd` falla sin mover nada.
+  if (ES_POPD.test(nombre)) return e.pila.length ? mover(e.pila.pop()) : false
+  const args = p.slice(1).filter((x) => !(shell === 'cmd' && /^\/d$/i.test(x)))
+  if (ES_PUSHD.test(nombre) && args.some((x) => /^[+-]\d+$/.test(x))) {
+    e.duda = dudaDeCarpeta(`\`${p.join(' ')}\` rota una pila de carpetas que este comando no deja ver`)
+    return false
+  }
+  const destino = args.find((x) => !x.startsWith('-'))
+  if (destino == null) {
+    if (ES_PUSHD.test(nombre)) {
+      // `pushd` a secas intercambia la carpeta actual con la ultima apilada.
+      if (!e.pila.length) return false
+      const tope = e.pila.pop()
+      e.pila.push(e.carpeta)
+      return mover(tope)
+    }
+    if (!args.includes('-')) return false
+    if (e.anterior != null) return mover(e.anterior)
+    e.duda = dudaDeCarpeta(`\`${nombre} -\` vuelve a una carpeta que este comando no nombra`)
+    return false
+  }
+  const expandida = rutaExpandida(e.carpeta, destino)
+  const ruta = path.resolve(e.carpeta, expandida)
+  if (DINAMICO_EN_RUTA.test(expandida) && !esCarpeta(ruta)) {
+    e.duda = dudaDeCarpeta(`el destino de \`${nombre} ${destino}\` se resuelve recien al ejecutar`)
+    return false
+  }
+  if (ES_PUSHD.test(nombre)) e.pila.push(e.carpeta)
+  // Una ruta absoluta vuelve a dejar en claro donde se esta.
+  if (path.isAbsolute(expandida)) e.duda = null
+  return mover(ruta)
+}
+
 // `$(git branch --show-current)` y sus equivalentes SI se pueden leer del
 // texto: son la rama actual, lo mismo que HEAD. Es la forma habitual de pushear
 // "esta rama" en un script, y tratarla como incierta seria preguntar de mas.
 const NOMBRE_DE_LA_RAMA_ACTUAL = String.raw`git\s+(?:branch\s+--show-current|rev-parse\s+--abbrev-ref\s+HEAD|symbolic-ref\s+--short\s+HEAD)`
 const SUSTITUCION_DE_LA_RAMA_ACTUAL = new RegExp(String.raw`\$\(\s*${NOMBRE_DE_LA_RAMA_ACTUAL}\s*\)|` + '`\\s*' + NOMBRE_DE_LA_RAMA_ACTUAL + '\\s*`', 'g')
+// Lo mismo con `$(git rev-parse --show-toplevel)`: es la raiz del repo en el
+// que ya esta la carpeta actual. Para saber a que repo va el push, `cd` ahi es
+// quedarse donde se esta (`.`).
+const RAIZ_DEL_REPO_ACTUAL = String.raw`git\s+rev-parse\s+--show-toplevel`
+const SUSTITUCION_DE_LA_RAIZ_DEL_REPO = new RegExp(String.raw`\$\(\s*${RAIZ_DEL_REPO_ACTUAL}\s*\)|` + '`\\s*' + RAIZ_DEL_REPO_ACTUAL + '\\s*`', 'g')
 
-function* pushes(comando, cwd, shell = 'bash', nivel = 0) {
-  let carpeta = cwd
-  for (const { texto: segmento, abre } of segmentosConCorte(comando.replace(SUSTITUCION_DE_LA_RAMA_ACTUAL, 'HEAD'), shell)) {
-    const { p, viaXargs } = comandoEfectivo(palabras(segmento, shell))
-    if (ES_CD.test(p[0] ?? '')) {
-      carpeta = carpetaTrasCd(carpeta, p.slice(1).find((x) => !x.startsWith('-')))
-      continue
+// Los comandos de los que este hook lee algo. Uno de estos cortado por una
+// expresion (`git push $(echo origin) main`) se lee entero, con lo que sigue al
+// cierre: `main` es parte del mismo comando.
+const SE_LEE = [ES_CD, ES_PUSHD, ES_POPD, ES_GIT, ES_GH, ES_LANZADOR, ES_SHELL, ES_POWERSHELL, ES_CMD, ES_EVAL]
+
+// Cada comando que el texto ejecuta: `p` (sus palabras, sin lo que lo
+// envuelve), la `carpeta` en la que corre y `duda`, el motivo cuando esa
+// carpeta no se puede saber con certeza. Mira a traves de envoltorios (`command
+// git push`), agrupaciones (`(git push)`, `if ...; then git push; fi`) y
+// comandos anidados (`bash -c`, `eval`), y sigue los `cd`, `pushd` y `popd`.
+//
+// La carpeta la mueve solo el `cd` que llega a lo que viene despues. En bash,
+// el de un subshell o una sustitucion -- `(cd x)`, `$(cd x)` -- termina con
+// ella: al cerrar el parentesis vuelve la carpeta de antes. En PowerShell y en
+// cmd un parentesis no abre otro proceso, y ese `cd` queda.
+function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, duda = null } = {}) {
+  const texto = comando.replace(SUSTITUCION_DE_LA_RAMA_ACTUAL, 'HEAD').replace(SUSTITUCION_DE_LA_RAIZ_DEL_REPO, '.')
+  const piezas = piezasDe(texto, shell)
+  // Para cada pieza que abre una expresion, la pieza en la que esa expresion cierra.
+  const cierreDe = new Map()
+  const abiertas = []
+  piezas.forEach((pieza, k) => {
+    if (ABRE.has(pieza.corte)) abiertas.push(k)
+    else if (CIERRA.has(pieza.corte) && abiertas.length) cierreDe.set(abiertas.pop(), k)
+  })
+
+  let e = estado ?? { carpeta: cwd, anterior: null, pila: [], duda }
+  const ambitos = []
+  const yaLeidas = new Set()
+  let siFallo = null
+  let antes = ''
+  for (let k = 0; k < piezas.length; k++) {
+    const pieza = piezas[k]
+    if (!yaLeidas.has(k) && pieza.texto.trim()) {
+      let { p, viaXargs, envoltorios } = comandoEfectivo(palabras(pieza.texto, shell))
+      let despues = pieza.corte
+      // Los parentesis vacios son los de una definicion de funcion (`git() { ... }`),
+      // no una expresion: lo que sigue es su cuerpo, y se lee como comandos.
+      const defineFuncion = cierreDe.get(k) === k + 1 && !piezas[k + 1].texto.trim()
+      if (ABRE.has(pieza.corte) && !defineFuncion && SE_LEE.some((forma) => forma.test(p[0] ?? ''))) {
+        // Lo corto una expresion: sigue despues de su cierre, y del de las que vengan.
+        let fin = k
+        while (ABRE.has(piezas[fin].corte)) {
+          const cierre = cierreDe.get(fin)
+          if (cierre == null) {
+            fin = piezas.length - 1
+            break
+          }
+          fin = cierre + 1
+          yaLeidas.add(fin)
+        }
+        ;({ p, viaXargs, envoltorios } = comandoEfectivo(palabras(texto.slice(pieza.desde, piezas[fin].hasta), shell)))
+        despues = piezas[fin].corte
+      }
+      // Lo que sigue a `cd x ||` corre solo si ese cd fallo: en la carpeta de antes.
+      const aqui = siFallo ?? e
+      siFallo = null
+      const nombre = p[0] ?? ''
+      if (ES_CD.test(nombre) || ES_PUSHD.test(nombre) || ES_POPD.test(nombre)) {
+        const previo = { ...e, pila: [...e.pila] }
+        if (cambiarDeCarpeta(e, p, { antes, despues, envoltorios, shell }) && despues === '||') siFallo = previo
+      } else {
+        const anidado = nivel < PROFUNDIDAD_MAXIMA ? comandoAnidado(p, shell) : null
+        if (anidado) {
+          // `eval` e `iex` corren en este mismo shell y su `cd` queda; el de
+          // `bash -c "cd x"` termina con ese proceso.
+          yield* comandosDe(anidado.comando, aqui.carpeta, anidado.shell, nivel + 1, ES_EVAL.test(nombre) ? { estado: aqui } : { duda: aqui.duda })
+        } else if (p.length) {
+          yield { p, viaXargs, carpeta: aqui.carpeta, duda: aqui.duda }
+        }
+      }
     }
-    const anidado = nivel < PROFUNDIDAD_MAXIMA ? comandoAnidado(p, shell) : null
-    if (anidado) {
-      // Su `cd` no sale del comando anidado: la carpeta de afuera no cambia.
-      yield* pushes(anidado.comando, carpeta, anidado.shell, nivel + 1)
-      continue
+    if (shell === 'bash') {
+      if (ABRE.has(pieza.corte)) {
+        ambitos.push(e)
+        e = { ...e, pila: [...e.pila] }
+      } else if (CIERRA.has(pieza.corte) && ambitos.length) {
+        e = ambitos.pop()
+      }
     }
-    if (ES_LANZADOR.test(p[0] ?? '')) {
+    antes = pieza.corte
+  }
+}
+
+// Cada `git push` del comando, con la carpeta efectiva en la que corre (el cwd
+// mas los cd y -C previos) y sus argumentos: sin `git`, sus opciones globales
+// ni `push`. `incierto` lleva el motivo cuando el texto no alcanza para saber
+// que se sube (xargs, un alias de git definido en la misma linea, un programa
+// que lo lanza); `duda`, cuando no alcanza para saber en que carpeta corre.
+function* pushes(comando, cwd, shell = 'bash') {
+  for (const { p, viaXargs, carpeta, duda: dudaPrevia } of comandosDe(comando, cwd, shell)) {
+    if (ES_LANZADOR.test(p[0])) {
       // `start git push origin main`, `Start-Process git -ArgumentList push,origin,main`:
       // lo que se alcanza a leer decide si toca main; el resto se pregunta.
       const lanzado = pushLanzado(p.slice(1))
-      if (lanzado) yield { dir: carpeta, args: lanzado, incierto: `lo lanza \`${p[0]}\`, que no deja leer sus argumentos con certeza` }
+      if (lanzado) yield { dir: carpeta, args: lanzado, incierto: `lo lanza \`${p[0]}\`, que no deja leer sus argumentos con certeza`, duda: dudaPrevia }
       continue
     }
-    if (!ES_GIT.test(p[0] ?? '')) continue
+    if (!ES_GIT.test(p[0])) continue
 
     let i = 1
     let dir = carpeta
+    let duda = dudaPrevia
     let alias = false
     while (i < p.length && p[i].startsWith('-')) {
       if (p[i] === '-C') {
-        dir = path.resolve(dir, rutaNativa(p[i + 1] ?? '.'))
+        const ruta = carpetaTrasCd(dir, p[i + 1] ?? '.')
+        if (ruta == null) duda ??= dudaDeCarpeta(`la ruta de \`git -C ${p[i + 1]}\` se resuelve recien al ejecutar`)
+        else dir = ruta
         i += 2
       } else if (['-c', '--git-dir', '--work-tree', '--namespace'].includes(p[i])) {
         if (p[i] === '-c' && /^alias\./i.test(p[i + 1] ?? '')) alias = true
@@ -321,23 +513,20 @@ function* pushes(comando, cwd, shell = 'bash', nivel = 0) {
     if (p[i] !== 'push') {
       // `git send-pack <remoto> <ref>...` es la forma interna de `git push`: se lee
       // igual, y se pregunta si no toca main.
-      if (p[i] === 'send-pack') yield { dir, args: p.slice(i + 1), incierto: 'usa `git send-pack`, la forma interna de `git push`' }
+      if (p[i] === 'send-pack') yield { dir, args: p.slice(i + 1), incierto: 'usa `git send-pack`, la forma interna de `git push`', duda }
       // `git -c alias.p=push p origin main`: el subcomando real no se ve.
-      else if (alias) yield { dir, args: [], incierto: 'usa un alias de git definido en la misma linea' }
+      else if (alias) yield { dir, args: [], incierto: 'usa un alias de git definido en la misma linea', duda }
       continue
     }
-    const incierto = viaXargs
-      ? 'sus argumentos llegan por xargs'
-      : abre
-        ? 'parte de sus argumentos sale de una expresion entre parentesis'
-        : null
-    yield { dir, args: p.slice(i + 1), incierto }
+    yield { dir, args: p.slice(i + 1), incierto: viaXargs ? 'sus argumentos llegan por xargs' : null, duda }
   }
 }
 
 // Variables, sustituciones de comando y comodines: lo que el shell resuelve
 // recien al ejecutar, y que este hook no puede leer del texto del comando.
 const DINAMICO = /[$`*?[]|%[A-Za-z_][A-Za-z0-9_]*%/
+// `(Get-Content rama.txt)`, `@(...)`: una expresion de PowerShell como argumento.
+const EXPRESION = /^@?\(/
 
 // El flag o refspec que vuelve forzado a un push, o null. Cubre lo que las reglas
 // `ask` de settings.json no ven por ser de prefijo: el flag al final
@@ -388,7 +577,9 @@ export function pushDelComando(comando, cwd, shell = 'bash') {
       }
       if (refspec.startsWith(':')) continue // borrar la rama remota
       const origen = refspec.replace(/^\+/, '').split(':')[0]
-      cabezas.push(origen === '' || origen === '@' ? 'HEAD' : origen)
+      // Un origen que se resuelve recien al ejecutar (`$RAMA`, `$(...)`) no se
+      // puede revisar: se revisa HEAD, lo mas probable. Ese push ya se pregunta.
+      cabezas.push(origen === '' || origen === '@' || DINAMICO.test(origen) || EXPRESION.test(origen) ? 'HEAD' : origen)
     }
     // Sin refspec, push de la rama actual; --tags solo, en cambio, no la sube.
     if (refspecs.length === 0 && !extra.includes('--branches') && !(extra.includes('--tags') && !args.includes('--follow-tags'))) {
@@ -417,7 +608,7 @@ const ramaCorta = (ref) => ref.replace(/^refs\/heads\//, '')
 // origin), que sirve para reconocer el Vault por su URL.
 export function destinosDelPush(comando, cwd, shell = 'bash') {
   const salida = []
-  for (const { dir, args, incierto: inciertoDelComando = null } of pushes(comando, cwd, shell)) {
+  for (const { dir, args, incierto: inciertoDelComando = null, duda = null } of pushes(comando, cwd, shell)) {
     const posicionales = []
     const destinos = []
     let soloTags = false
@@ -446,14 +637,24 @@ export function destinosDelPush(comando, cwd, shell = 'bash') {
       if (borraTodo || refspec.startsWith(':')) borra.push(ramaCorta(ref))
     }
     // Lo que el shell resuelve recien al ejecutar (`$RAMA`, `$(...)`, un comodin
-    // en el refspec) no se puede leer del texto: viaja como `incierto`, con el
-    // motivo, para que prePushMain pregunte en vez de dejarlo pasar en silencio.
+    // en el refspec, una expresion entre parentesis de PowerShell) no se puede
+    // leer del texto: viaja como `incierto`, con el motivo, para que prePushMain
+    // pregunte en vez de dejarlo pasar en silencio. Lo mismo si lo que no se
+    // puede leer es la carpeta (`dudaDeCarpeta`).
     const dinamico = posicionales.find((w) => DINAMICO.test(w))
-    const incierto = inciertoDelComando ?? (dinamico ? `"${dinamico}" se resuelve recien al ejecutar` : null)
+    const deLosArgumentos = posicionales.some((w) => EXPRESION.test(w))
+      ? 'parte de sus argumentos sale de una expresion entre parentesis'
+      : dinamico
+        ? `"${dinamico}" se resuelve recien al ejecutar`
+        : null
+    const incierto = inciertoDelComando ?? deLosArgumentos ?? duda
     const forzado = pushForzado(args)
-    if (refspecs.length === 0 && destinos.length === 0 && !soloTags && !incierto) destinos.push(RAMA_ACTUAL, UPSTREAM)
+    // Sin refspec sube la rama actual, tambien cuando lo unico que no se puede
+    // leer es el remoto (`git push $REMOTO`) o la carpeta. No cuando los
+    // argumentos llegan por otro lado (xargs, un alias, un lanzador).
+    if (refspecs.length === 0 && destinos.length === 0 && !soloTags && !inciertoDelComando) destinos.push(RAMA_ACTUAL, UPSTREAM)
     if (destinos.length || incierto || forzado) {
-      salida.push({ dir, remoto: posicionales[0] ?? null, destinos: [...new Set(destinos)], incierto, forzado, borra: [...new Set(borra)] })
+      salida.push({ dir, remoto: posicionales[0] ?? null, destinos: [...new Set(destinos)], incierto, forzado, borra: [...new Set(borra)], dudaDeCarpeta: duda })
     }
   }
   return salida
@@ -464,14 +665,8 @@ const FLAGS_DE_METADATA = /^(--body|-b|--body-file|-F|--base|-B)(=|$)/
 // `gh pr create` o un `gh pr edit` que toca body o base (lo que valida
 // pr-metadata). `objetivo` es el numero/URL/rama que se le paso a edit.
 export function cambioDePR(comando, cwd, shell = 'bash') {
-  let carpeta = cwd
-  for (const segmento of segmentos(comando, shell)) {
-    const { p } = comandoEfectivo(palabras(segmento, shell))
-    if (ES_CD.test(p[0] ?? '')) {
-      carpeta = carpetaTrasCd(carpeta, p.slice(1).find((x) => !x.startsWith('-')))
-      continue
-    }
-    if (!ES_GH.test(p[0] ?? '') || p[1] !== 'pr') continue
+  for (const { p, carpeta } of comandosDe(comando, cwd, shell)) {
+    if (!ES_GH.test(p[0]) || p[1] !== 'pr') continue
     const args = p.slice(3)
     if (p[2] === 'create') {
       if (args.some((a) => a === '--web' || a === '-w' || a === '--dry-run')) continue
@@ -692,12 +887,18 @@ export function prePushMain({ push, correr, vault, enSolo = enModoSolo }) {
   if (raiz && enSolo(raiz)) return null
   const tocaMain = ramasDestino(push, correr).has(RAMA_PROTEGIDA)
   if (!tocaMain && !push.incierto) return null
-  if (esElVault({ push, raiz, correr, vault })) return null
-  if (!tocaMain) {
+  // El Vault exime solo si la carpeta se pudo leer del comando. Si no (`cd "$X"
+  // && git push ...`), que la carpeta evaluada sea el Vault no alcanza: un `main`
+  // escrito en el comando se deniega igual, y lo demas se pregunta.
+  const enElVault = esElVault({ push, raiz, correr, vault })
+  if (enElVault && !push.dudaDeCarpeta) return null
+  if (!tocaMain || (enElVault && !push.destinos.includes(RAMA_PROTEGIDA))) {
     return preguntar([
       `reglas-pr (SHS-M42): no se puede saber a que rama sube este push en ${raiz ?? push.dir}: ${push.incierto}.`,
       `\`${RAMA_PROTEGIDA}\` del proyecto solo recibe merges desde \`dev\` por PR. Confirma con el usuario que este push no la toca,`,
-      'o vuelve a escribirlo con el remoto y la rama literales (`git push origin <rama>`) para que no haga falta preguntar.',
+      push.dudaDeCarpeta
+        ? 'o vuelve a escribirlo con la carpeta, el remoto y la rama literales (`cd <ruta> && git push origin <rama>`) para que no haga falta preguntar.'
+        : 'o vuelve a escribirlo con el remoto y la rama literales (`git push origin <rama>`) para que no haga falta preguntar.',
     ])
   }
   const sobreElVault = vault.rutas.length
@@ -710,7 +911,8 @@ export function prePushMain({ push, correr, vault, enSolo = enModoSolo }) {
       permissionDecisionReason: [
         `reglas-pr (SHS-M42): push a \`${RAMA_PROTEGIDA}\` denegado en ${raiz ?? push.dir}.`,
         '`main` del proyecto solo recibe merges desde `dev` por PR: trabaja en la rama del milestone (`tipo/M<n>-slug`, desde `dev`) y pushea esa rama.',
-        sobreElVault,
+        ...(push.dudaDeCarpeta ? [`Del comando ${push.dudaDeCarpeta}; se evaluo en ${push.dir}. Si el push era para otro repo, entra a su carpeta con una ruta literal (\`cd <ruta> && git push ...\`).`] : []),
+        ...(enElVault ? [] : [sobreElVault]),
         'Para escribir en el Vault usa `souclaude vault-sync --push -m "<mensaje>" --paths Project-<PREFIJO>`, que corre sin confirmacion. No intentes rodear este hook.',
       ].join('\n'),
     },
@@ -742,7 +944,7 @@ export function prePushBorrado({ push, correr, vault, enSolo = enModoSolo }) {
   if (!push.borra?.includes(RAMA_DE_INTEGRACION)) return null
   const raiz = raizDelRepo(push.dir, correr)
   if (raiz && enSolo(raiz)) return null
-  if (esElVault({ push, raiz, correr, vault })) return null
+  if (!push.dudaDeCarpeta && esElVault({ push, raiz, correr, vault })) return null
   return preguntar([
     `reglas-pr: este push BORRA la rama \`${RAMA_DE_INTEGRACION}\` del remoto en ${raiz ?? push.dir}.`,
     `\`${RAMA_DE_INTEGRACION}\` es la rama de integracion: de ella nacen las ramas de trabajo y a ella apuntan los PR.`,

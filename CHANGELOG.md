@@ -62,6 +62,19 @@ versión, ajustar a él el `to` de las dos migraciones nuevas y regenerar
   Si lo que se alcanza a leer toca `main`, se deniega; el resto de lo que lanzan
   esos programas se pregunta. Sigue sin verse el push que hace un script u otro
   programa por dentro: la barrera de `main` es la protección de rama en GitHub.
+- **El hook sigue la carpeta del push solo con el `cd` que de verdad llega a él.**
+  Tomaba por bueno cualquier `cd` anterior, también el que corre en otro proceso:
+  `cd <vault> | cat; git push origin main` (o con `&`, o seguido de `cd -` o
+  `popd`) se evaluaba en el Vault —que está exento— y pasaba, y con una carpeta
+  sin reglas se salteaba el check de secretos. Ahora no mueven la carpeta el `cd`
+  de una tubería, el que va al fondo, el de un subshell o una sustitución
+  (`(cd x)`, `$(cd x)`) ni el que va detrás de un envoltorio que no es del shell
+  (`nohup cd x`); `cd -`, `pushd`/`popd` y `Push-Location`/`Pop-Location` se
+  siguen. Si la carpeta no se puede leer del comando (`cd "$DESTINO"`,
+  `git -C "$DIR"`), el hook lo evalúa donde está y **pregunta**, o deniega si ahí
+  toca `main`; `~`, `$HOME`, `$PWD` y `$(git rev-parse --show-toplevel)` sí se
+  resuelven. Un comando cortado por una expresión se lee entero: en `git push
+  $(echo origin) main`, `main` se ve y se deniega.
 - **Skill `soutec-md-a-pdf`**: del HTML crudo del Markdown solo pasa el marcado
   conocido, y el `href` de un enlace va escapado (antes, un `href` con comillas
   cerraba la etiqueta e inyectaba otra, p. ej. un `<img src="file://…">`). El
