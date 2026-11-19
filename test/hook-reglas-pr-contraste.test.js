@@ -484,6 +484,204 @@ test('hook real: un guion pasado a `bash` por heredoc se revisa como cualquier c
   }
 })
 
+// --- Lo que encontro la cuarta lectura ---------------------------------------
+//
+// Una cuarta verificacion independiente se corto dos veces por errores de red,
+// pero dejo sus casos escritos. Pasados por el contraste con bash y zsh, 103
+// ejecuciones de 113 comandos corrian donde el hook no lo preveia. Lo mas grave:
+// un `return` dentro de una funcion, una funcion definida dentro de un `if` y
+// llamada despues, y unos 900 `eval` encadenados que agotaban la pila del lector
+// (el hook fallaba y dejaba pasar el comando).
+
+test('carpeta del push: un `return`, un `exit`, un `break` o un `continue` dejan salir antes', () => {
+  const push = (comando) => destinosDelPush(comando, CWD).at(-1)
+  const [otro, sub] = [path.resolve(CWD, 'otro'), path.resolve(CWD, 'sub')]
+  for (const comando of [
+    `f() { cd "${otro}"; return; cd "${sub}"; }; f; git push origin x`,
+    `f() { if true; then cd "${otro}"; return; fi; cd "${sub}"; }; f; git push origin x`,
+    `source /dev/stdin <<'EOF'\ncd "${otro}"\nreturn\ncd "${sub}"\nEOF\ngit push origin x`,
+  ]) {
+    const p = push(comando)
+    assert.match(p.dudaDeCarpeta, /return/, comando)
+    assert.deepEqual(new Set([p.dir, p.carpetaAlternativa]), new Set([otro, sub]), comando)
+  }
+  // En un bucle, ademas, puede no haber dado ninguna vuelta: tres carpetas posibles.
+  assert.notEqual(push(`for i in 1 2; do cd "${otro}"; break; cd "${sub}"; done; git push origin x`).dudaDeCarpeta, null)
+  // `cd x || return` sale solo dentro de una funcion; afuera, en bash, sigue.
+  assert.match(push('cd no-existe || return; git push origin x').dudaDeCarpeta, /esa carpeta no existe/)
+  // Y el `exit` de un subshell o de una tuberia sale solo de ahi.
+  for (const comando of ['cd no-existe || (exit 1); git push origin x', 'cd no-existe || exit 1 | cat; git push origin x']) {
+    assert.equal(push(comando).dir, CWD, comando)
+    assert.match(push(comando).dudaDeCarpeta, /esa carpeta no existe/, comando)
+  }
+})
+
+test('carpeta del push: una funcion definida con una condicion se lee al llamarla, donde se la llama', () => {
+  const dirs = (comando) => destinosDelPush(comando, CWD).map((p) => p.dir)
+  const otro = path.resolve(CWD, 'otro')
+  // El push esta en el cuerpo: corre donde se llama a la funcion, no donde se la definio.
+  for (const comando of ['cd sub; true && g() { git push origin x; }; cd ../otro; g', 'cd sub; if true; then g() { git push origin x; }; fi; cd ../otro; g', 'cd sub; { g() { git push origin x; }; }; cd ../otro; g', 'f() { g() { git push origin x; }; }; cd sub; f; cd ../otro; g']) {
+    assert.ok(dirs(comando).includes(otro), comando)
+  }
+  // Redefinida dentro de un `if` que no corre: la de antes sigue siendo la que corre.
+  assert.ok(dirs('f() { git push origin x; }; if false; then f() { :; }; fi; cd otro; f').includes(otro))
+  // Una funcion llamada como un envoltorio (`command`) no desarma la lectura de lo que sigue.
+  const p = destinosDelPush('w() { case a in a) command() { "$@"; } ;; b) cd otro ;; esac; }; w; git push origin x', CWD).at(-1)
+  assert.ok(p.dir === CWD || p.carpetaAlternativa === CWD, 'el push no se da por hecho en otro')
+  // `unset -f` la borra en los dos shells; `unfunction`, solo en zsh.
+  assert.equal(destinosDelPush('f() { cd otro; }; unset -f f; f; git push origin x', CWD).at(-1).dir, CWD)
+  const quiza = destinosDelPush('f() { cd otro; }; unfunction f; f; git push origin x', CWD).at(-1)
+  assert.equal(quiza.dir, CWD)
+  assert.equal(quiza.carpetaAlternativa, otro)
+  // La que se define dentro de un subshell no existe afuera, aunque se llame como un comando que se lee.
+  assert.ok(destinosDelPush('( eval eval \'h() { cd otro; }\' ); eval "git push origin main"', CWD).some((p) => p.destinos.includes('main')))
+})
+
+test('carpeta del push: `pushd -n`, `popd +N`, `dirs -c`, `cd -N`, `cd` a secas y opciones de un solo shell', () => {
+  const push = (comando) => destinosDelPush(comando, CWD).at(-1)
+  const [otro, sub] = [path.resolve(CWD, 'otro'), path.resolve(CWD, 'otro', 'sub')]
+  assert.equal(push('pushd -n otro; git push origin x').dir, CWD)
+  assert.match(push('pushd otro; popd +1; git push origin x').dudaDeCarpeta, /saca de la pila/)
+  assert.equal(push('pushd otro; pushd sub; dirs -c; popd; git push origin x').dir, sub, '`dirs -c` vacia la pila: el `popd` no vuelve')
+  assert.match(push('cd -1; git push origin x').dudaDeCarpeta, /pila de carpetas de zsh/)
+  assert.equal(push('cd; git push origin x').dir, os.homedir())
+  for (const comando of ['HOME=/tmp cd; git push origin x', 'OLDPWD=/tmp cd -; git push origin x', 'CDPATH=/tmp cd otro; git push origin x']) {
+    assert.match(push(comando).dudaDeCarpeta, /variable que el mismo comando cambia/, comando)
+  }
+  // `cd -q` y `noglob cd` solo corren en zsh; `cd -x` no corre en ninguno.
+  for (const comando of ['cd -q otro; git push origin x', 'noglob cd otro; git push origin x']) {
+    assert.equal(push(comando).dir, CWD, comando)
+    assert.equal(push(comando).carpetaAlternativa, otro, comando)
+  }
+  assert.equal(push('cd -x otro; git push origin x').dir, CWD)
+  assert.equal(push('cd -x otro; git push origin x').dudaDeCarpeta, null)
+  // Una redireccion que puede fallar deja el `cd` en duda.
+  assert.equal(push('cd otro >/no/existe/x; git push origin x').carpetaAlternativa, otro)
+  assert.equal(push('cd otro >/dev/null 2>&1; git push origin x').dir, otro)
+})
+
+test('destinosDelPush: el push escondido en un escape, una expansion, un arreglo o `env -S` se ve', () => {
+  const pushes = (comando, shell) => destinosDelPush(comando, CWD, shell)
+  for (const comando of ["git $'\\x70ush' origin main", "git $'\\160ush' origin main", "env -S 'git push origin main'", 'env --split-string="git push origin main"']) {
+    assert.ok(pushes(comando).some((p) => p.destinos.includes('main')), comando)
+  }
+  // El subcomando sale de una expansion: puede ser `push`.
+  for (const comando of ['git {push,} origin main', 's=push; git $s origin main', 'git $"push" origin main']) {
+    assert.ok(pushes(comando).some((p) => p.incierto), comando)
+  }
+  assert.ok(pushes("& git @('push','origin','main')", 'powershell').some((p) => p.destinos.includes('main')))
+  // Lo que `eval` lee de lo que imprime otro comando no se ve: se pregunta.
+  assert.ok(pushes('eval "$(echo git push origin main)"').some((p) => p.incierto))
+  assert.match(pushes('eval "$(echo cd otro)"; git push origin x').at(-1).dudaDeCarpeta, /sale de una variable o de lo que imprime otro comando/)
+  assert.match(pushes("source <(echo 'cd otro'); git push origin x").at(-1).dudaDeCarpeta, /sale de una variable o de lo que imprime otro comando/)
+  // `GIT_DIR` y `--git-dir` fijan el repo: la carpeta no lo dice.
+  for (const comando of ['GIT_DIR=x git push origin x', 'git --git-dir=x push origin x', 'export GIT_WORK_TREE=x; git push origin x']) {
+    assert.match(pushes(comando).at(-1).dudaDeCarpeta, /--git-dir/, comando)
+  }
+})
+
+test('carpeta del push: varias entradas para un shell, sintaxis de zsh y continuaciones de linea entre operadores', () => {
+  const pushes = (comando) => destinosDelPush(comando, CWD)
+  const otro = path.resolve(CWD, 'otro')
+  // bash usa la ultima redireccion de entrada; zsh las concatena: el push puede correr en las dos carpetas.
+  for (const comando of ["bash <<A <<B\ncd otro\nA\ngit push origin x\nB\n", "cat <<A <<B | sh\ncd otro\nA\ngit push origin x\nB\n"]) {
+    assert.deepEqual(new Set(pushes(comando).flatMap((p) => [p.dir, p.carpetaAlternativa]).filter(Boolean)), new Set([CWD, otro]), comando)
+  }
+  for (const comando of ['{ cd otro; } always { cd sub; }; git push origin x', 'cd otro; for i (1 2) cd -; git push origin x', 'if true { cd otro }; git push origin x']) {
+    assert.notEqual(pushes(comando).at(-1).dudaDeCarpeta, null, comando)
+  }
+  // `&\<salto>&` es `&&`, y `;&` termina una rama de `case`: ninguno manda nada al fondo.
+  assert.equal(pushes('cd otro &\\\n& git push origin x').at(-1).dir, otro)
+  assert.equal(pushes('case a in a) cd otro ;& b) true ;; esac; git push origin x').at(-1).carpetaAlternativa, otro)
+  // Lo que sigue al cierre de una expresion que es argumento de otro comando no es un comando aparte.
+  assert.equal(pushes('echo $(date) cd otro; git push origin x').at(-1).dir, CWD)
+  assert.equal(pushes('echo $(date) cd otro; git push origin x').at(-1).dudaDeCarpeta, null)
+  assert.ok(pushes('case x in (x) git push origin main ;; esac').some((p) => p.destinos.includes('main')), 'salvo el patron de un `case`')
+})
+
+test('carpeta del push: una funcion recibe sus argumentos como los entienden bash y zsh', () => {
+  const push = (comando) => destinosDelPush(comando, CWD).at(-1)
+  const otro = path.resolve(CWD, 'otro')
+  // `"$@"` pasa cada argumento, y el `cd` corre una sola vez.
+  assert.equal(push('g() { "$@"; }; g cd otro; git push origin x').dir, otro)
+  assert.equal(push('g() { cd "$1"; }; g otro; git push origin x').dir, otro)
+  // `"$*"` los junta en una palabra: un comando llamado `cd otro` no existe.
+  assert.equal(push('g() { "$*"; }; g cd otro; git push origin x').dir, CWD)
+  // Un argumento vacio sigue siendo una palabra: el comando `''` no existe.
+  assert.equal(push('g() { "$@"; }; g "" cd otro; git push origin x').dir, CWD)
+  // Sin comillas, bash parte el argumento y zsh no: puede ser cualquiera de las dos.
+  const partido = push('g() { $1; }; g "cd otro"; git push origin x')
+  assert.deepEqual(new Set([partido.dir, partido.carpetaAlternativa]), new Set([CWD, otro]))
+  // Una funcion definida adentro usa los suyos, y un `~` ya llega expandido.
+  assert.equal(push('f() { g() { "$@"; }; g cd otro; }; f; git push origin x').dir, otro)
+  assert.equal(push('f() { g() { "$@"; }; g cd ~; }; f; git push origin x').dir, os.homedir())
+  // `function g {` dentro de un grupo guarda su propio cuerpo, no el del grupo.
+  assert.equal(push('f() { function g { cd otro; }; g; }; f; git push origin x').dir, otro)
+  assert.equal(push('{ function g { cd otro; }; }; g; git push origin x').dir, otro)
+})
+
+test('carpeta del push: lo que se define en una tuberia o al fondo no queda definido afuera', () => {
+  for (const comando of ['{ h() { cd otro; }; } | cat; h; git push origin x', 'h() { cd otro; } | cat; h; git push origin x', 'if true; then h() { cd otro; }; fi | cat; h; git push origin x']) {
+    const p = destinosDelPush(comando, CWD).at(-1)
+    assert.equal(p.dir, CWD, comando)
+    assert.equal(p.dudaDeCarpeta, null, comando)
+  }
+  // Al final de una tuberia, zsh la deja definida y bash no.
+  const p = destinosDelPush('cat /dev/null | { h() { cd otro; }; }; h; git push origin x', CWD).at(-1)
+  assert.deepEqual(new Set([p.dir, p.carpetaAlternativa]), new Set([CWD, path.resolve(CWD, 'otro')]))
+})
+
+test('carpeta del push: una asignacion entre comillas no es una asignacion, y las opciones de `cd` van antes', () => {
+  const push = (comando) => destinosDelPush(comando, CWD).at(-1)
+  const otro = path.resolve(CWD, 'otro')
+  for (const comando of ['"X"=1 cd otro; git push origin x', 'X\\=1 cd otro; git push origin x', "! 'X=1' cd otro; git push origin x"]) {
+    assert.equal(push(comando).dir, CWD, comando)
+    assert.equal(push(comando).carpetaAlternativa, null, comando)
+  }
+  for (const comando of ['X+=1 cd otro; git push origin x', '\\\nX=1 cd otro; git push origin x', "X='1' cd otro; git push origin x"]) {
+    assert.equal(push(comando).dir, otro, comando)
+  }
+  // `a[0]=1` asigna en bash; en zsh puede fallar, y entonces el `cd` no corre.
+  assert.equal(push('a[0]=1 cd otro; git push origin x').carpetaAlternativa, otro)
+  // En `cd otro bash -c x`, `-c` no es una opcion de `cd`: son palabras de mas.
+  assert.match(push('cd otro bash -c x; git push origin x').dudaDeCarpeta, /mas de un destino/)
+})
+
+test('hook real: las funciones que pasan sus argumentos a otro programa, y un git con subcomando variable', () => {
+  const dir = proyecto()
+  // El cuerpo se lee con los argumentos puestos, y lo que sigue al nombre de la
+  // funcion tambien se lee como un comando: el push a main se ve.
+  for (const comando of ['w() { op run -- "$@"; }; w git push origin main', 'w() { ssh host "$@"; }; w git push origin main', 'g() { $SHELL -c "$*"; }; g git push origin main', 'w() { npx -y "$@"; }; w git push origin main']) {
+    assert.equal(decision(dir, comando)?.tipo, 'deny', comando)
+  }
+  // Sin un push en el texto, un subcomando de git que sale de una variable no pregunta.
+  for (const comando of ['g() { git "$@"; }; g status', 'for c in status log; do git $c; done']) {
+    assert.equal(decision(dir, comando), null, comando)
+  }
+})
+
+test('hook real: lo que la cuarta lectura encontro que seguia pasando, ya no pasa', () => {
+  const vault = vaultDePrueba()
+  const dir = proyecto()
+  for (const comando of [
+    `f() { cd "${dir}"; return; cd "${vault}"; }; cd "${vault}"; f; git push origin main`,
+    `cd "${vault}"; true && g() { git push origin main; }; cd "${dir}"; g`,
+    `echo $(date) cd "${vault}"; git push origin main`,
+    `bash <<A <<B\ncd "${vault}"\nA\ngit push origin main\nB\n`,
+    `pushd -n "${vault}"; git push origin main`,
+    "git $'\\x70ush' origin main",
+    `f() { cd "${vault}"; }; unset -f f; f; git push origin main`,
+  ]) {
+    assert.equal(decision(dir, comando)?.tipo, 'deny', comando)
+  }
+  // Unos mil `eval` encadenados ya no agotan la pila: se pregunta.
+  assert.equal(decision(dir, `${'eval '.repeat(1000)}git push origin main`)?.tipo, 'ask')
+  // Y lo que es del Vault sigue pasando.
+  for (const comando of [`sync() { cd "${vault}" || return 1; git push origin main; }; sync`, `cd "${vault}" && git push origin main`]) {
+    assert.equal(decision(dir, comando), null, comando)
+  }
+})
+
 // --- El hook real, como lo corre Claude Code ------------------------------------
 
 function git(dir, ...args) {

@@ -159,6 +159,32 @@ versión, ajustar a él el `to` de las dos migraciones nuevas y regenerar
   pasaba con un aviso), un comando que no se pudo leer con certeza (un heredoc
   sin cierre) o un `git` que no responde dentro del plazo de la revisión (45 s;
   el hook está registrado con 60).
+- **Lo que encontró la cuarta lectura del hook.** Una cuarta verificación
+  independiente y el contraste con bash y zsh hallaron más formas de que el push
+  corra en otra carpeta que la prevista; todas se corrigen: un `return`, `exit`,
+  `break` o `continue` que sale antes de una función, de un guion leído con
+  `source` o de un bucle; una función definida dentro de un `if`, tras un `&&`,
+  en un grupo o dentro de otra función, que se lee al llamarla y donde se la
+  llama (y que no queda definida si se la definió en una tubería); `unset -f`,
+  `unfunction` y un alias del mismo comando; `pushd -n`, `popd +N`, `dirs -c`,
+  `cd -N`, `cd` a secas (va a la carpeta personal) y las opciones de un solo
+  shell (`cd -q`, `noglob cd`); `HOME=`, `OLDPWD=` o `CDPATH=` delante del `cd`,
+  y una redirección que falla; varios heredocs para un mismo shell (zsh los
+  concatena); la sintaxis de zsh (`if x { … }`, `always`, `for i (…)`);
+  `&\`+salto+`&`, que es `&&`; y lo que sigue a `echo $(date)` ya no se lee
+  como otro comando. Se ve el push escondido en un escape (`$'\x70ush'`), en
+  `env -S`, en un arreglo de PowerShell o en un subcomando que sale de una
+  variable (si el comando habla de un push), y `GIT_DIR` o `--git-dir` dejan
+  la carpeta en duda.
+- **Las funciones se leen con los argumentos de cada llamada**, como los
+  entienden bash y zsh (`"$@"`, `"$*"`, `$1` con y sin comillas, un argumento
+  vacío): `git() { command git -C <proyecto> "$@"; }; git push origin main` se
+  deniega, y una función que pasa sus argumentos a otro programa (`op run --
+  "$@"`, `ssh host "$@"`) sigue mostrando el push. Una asignación entre
+  comillas (`"X"=1 cd x`) no es una asignación; `X+=1 cd x` sí.
+- **Un error del hook al leer un push ya no lo deja pasar**: si la lectura
+  falla, se pregunta (unos mil `eval` encadenados agotaban la pila del lector,
+  y el push pasaba sin revisar). Los `eval` encadenados tienen su propio tope.
 - **Skill `soutec-md-a-pdf`**: del HTML crudo del Markdown solo pasa el marcado
   conocido, y el `href` de un enlace va escapado (antes, un `href` con comillas
   cerraba la etiqueta e inyectaba otra, p. ej. un `<img src="file://…">`). El
