@@ -80,6 +80,82 @@ export function segmentos(comando, shell = 'bash') {
 const ABRE = new Set(['(', '`('])
 const CIERRA = new Set([')', '`)'])
 
+// El heredoc que abre un `<<` (`j` es la posicion que le sigue): su
+// delimitador, si lleva `-` (el cierre puede ir sangrado con tabuladores) y si
+// es `literal` -- con el delimitador entre comillas (`<<'EOF'`) el cuerpo no se
+// expande --, o null si lo que sigue no es un delimitador.
+function heredocEn(comando, j) {
+  const tabs = comando[j] === '-'
+  if (tabs) j++
+  while (comando[j] === ' ' || comando[j] === '\t') j++
+  const c = comando[j]
+  if (c === "'" || c === '"') {
+    const fin = comando.indexOf(c, j + 1)
+    return fin === -1 ? null : { delim: comando.slice(j + 1, fin), tabs, literal: true }
+  }
+  const delim = comando.slice(c === '\\' ? j + 1 : j).match(/^[A-Za-z_][A-Za-z0-9_.-]*/)?.[0]
+  return delim ? { delim, tabs, literal: c === '\\' } : null
+}
+
+// Los cuerpos de los heredocs pendientes, que empiezan en `desde`: donde va
+// cada uno y `fin`, la posicion del fin de linea del ultimo cierre. null si a
+// alguno le falta el cierre (no era un heredoc, o esta sin terminar: no se
+// salta nada).
+function cuerposDeHeredocs(comando, desde, heredocs) {
+  const cuerpos = []
+  let pos = desde
+  let fin = -1
+  for (const { delim, tabs, literal } of heredocs) {
+    const inicio = pos
+    fin = -1
+    while (pos <= comando.length) {
+      const salto = comando.indexOf('\n', pos)
+      const hasta = salto === -1 ? comando.length : salto
+      let linea = comando.slice(pos, hasta).replace(/\r$/, '')
+      if (tabs) linea = linea.replace(/^\t+/, '')
+      if (linea === delim) {
+        cuerpos.push({ desde: inicio, hasta: pos, literal })
+        fin = hasta
+      }
+      pos = hasta + 1
+      if (fin !== -1) break
+    }
+    if (fin === -1) return null
+  }
+  return { cuerpos, fin }
+}
+
+// El parentesis que cierra al de `abre`, antes de `limite`, o -1.
+function cierreDelParentesis(comando, abre, limite) {
+  let profundidad = 0
+  let comilla = null
+  for (let j = abre; j < limite; j++) {
+    const c = comando[j]
+    if (comilla) {
+      if (c === comilla) comilla = null
+    } else if (c === "'" || c === '"') {
+      comilla = c
+    } else if (c === '\\') {
+      j++
+    } else if (c === '(') {
+      profundidad++
+    } else if (c === ')' && --profundidad === 0) {
+      return j
+    }
+  }
+  return -1
+}
+
+// El here-string de PowerShell que abre la comilla de `i` (`@'` o `@"` al final
+// de una linea): la posicion del `@` que lo cierra, o -1 si no lo es.
+function finDeHereString(comando, i) {
+  if (comando[i - 1] !== '@') return -1
+  const salto = comando.indexOf('\n', i)
+  if (salto === -1 || comando.slice(i + 1, salto).trim() !== '') return -1
+  const cierre = comando.indexOf(`\n${comando[i]}@`, salto)
+  return cierre === -1 ? -1 : cierre + 2
+}
+
 // Lo mismo, pieza por pieza y sin descartar las vacias: el texto tal cual
 // (`desde` y `hasta` son su posicion en el comando) y `corte`, el operador que
 // la termino. Un salto de linea cuenta como `;`. `(` y `)` abren y cierran una
@@ -87,10 +163,15 @@ const CIERRA = new Set([')', '`)'])
 // 'bash' (y los que se le parecen), 'powershell' o 'cmd'; en cmd un `&` suelto
 // no manda nada al fondo: separa comandos que corren uno tras otro, como `;`.
 //
-// Un `#` al comienzo de una palabra abre un comentario hasta el fin de la linea
-// (en bash y en PowerShell; en cmd no): su texto se descarta. Sin eso, el
-// apostrofo de `# don't ...` abria una comilla que se tragaba las lineas
-// siguientes, y el push que hubiera en ellas no se veia.
+// Lo que no es un comando se descarta:
+// - Un comentario. Un `#` al comienzo de una palabra llega hasta el fin de la
+//   linea (en bash y en PowerShell; en cmd no). Sin eso, el apostrofo de
+//   `# don't ...` abria una comilla que se tragaba las lineas siguientes, y el
+//   push que hubiera en ellas no se veia.
+// - El cuerpo de un heredoc (`<<EOF ... EOF`) y un here-string de PowerShell
+//   (`@' ... '@`): son texto. Leidos como comandos, el codigo en linea de un
+//   documento (\`git push origin main\`) contaba como un push, y un `1)` suelto
+//   cerraba el subshell que lo contenia.
 export function piezasDe(comando, shell = 'bash') {
   const escape = shell === 'powershell' ? '`' : '\\'
   const piezas = []
@@ -98,9 +179,26 @@ export function piezasDe(comando, shell = 'bash') {
   let comilla = null
   let enBackticks = false
   let enPalabra = false
+  let heredocs = []
   const cortar = (hasta, corte, largo = 1) => {
     piezas.push({ texto: comando.slice(desde, hasta), desde, hasta, corte })
     desde = hasta + largo
+  }
+  // Las sustituciones (`\`...\`` y `$(...)`) del texto que va de `a` a `b`: su
+  // contenido son comandos, y se suma como una expresion mas.
+  const sustituciones = (a, b) => {
+    for (let j = a; j < b; j++) {
+      const c = comando[j]
+      if (c === '\\') j++
+      const abre = c === '`' ? j : c === '$' && comando[j + 1] === '(' ? j + 1 : -1
+      if (abre === -1) continue
+      const cierra = c === '`' ? comando.indexOf('`', abre + 1) : cierreDelParentesis(comando, abre, b)
+      if (cierra === -1 || cierra >= b) continue
+      const adentro = piezasDe(comando.slice(abre + 1, cierra), shell).map((pieza) => ({ ...pieza, desde: pieza.desde + abre + 1, hasta: pieza.hasta + abre + 1 }))
+      adentro.at(-1).corte = c === '`' ? '`)' : ')'
+      piezas.push({ texto: '', desde: abre, hasta: abre, corte: c === '`' ? '`(' : '(' }, ...adentro)
+      j = cierra
+    }
   }
   for (let i = 0; i < comando.length; i++) {
     const c = comando[i]
@@ -112,17 +210,28 @@ export function piezasDe(comando, shell = 'bash') {
     const empiezaPalabra = !enPalabra
     enPalabra = true
     if (c === "'" || c === '"') {
-      comilla = c
+      const cierre = shell === 'powershell' ? finDeHereString(comando, i) : -1
+      if (cierre === -1) comilla = c
+      else i = cierre
     } else if (c === escape && i + 1 < comando.length) {
       i++
     } else if (c === '&' && ((i > desde && /[<>]/.test(comando[i - 1])) || comando[i + 1] === '>')) {
       // 2>&1, &>: una redireccion, no un operador.
     } else if (c === '#' && empiezaPalabra && shell !== 'cmd') {
-      // Comentario: hasta el fin de la linea no hay nada que se ejecute.
       const fin = comando.indexOf('\n', i)
       cortar(i, ';', (fin === -1 ? comando.length : fin) - i)
       i = desde - 1
       enPalabra = false
+    } else if (c === '<' && comando[i + 1] === '<' && shell === 'bash') {
+      // `<<<` es un here-string: una palabra mas. `<<` abre un heredoc, y su
+      // cuerpo empieza en la linea siguiente.
+      if (comando[i + 2] === '<') {
+        i += 2
+      } else {
+        const heredoc = heredocEn(comando, i + 2)
+        if (heredoc) heredocs.push(heredoc)
+        i++
+      }
     } else if (c === '`' && shell === 'bash') {
       cortar(i, enBackticks ? '`)' : '`(')
       // Lo que sigue al backtick que abre es el comienzo de un comando; lo que
@@ -135,6 +244,15 @@ export function piezasDe(comando, shell = 'bash') {
     } else if (c === ';' || c === '\n' || c === '\r') {
       cortar(i, ';')
       enPalabra = false
+      const cuerpo = c === '\n' && heredocs.length ? cuerposDeHeredocs(comando, i + 1, heredocs) : null
+      if (c === '\n') heredocs = []
+      if (cuerpo) {
+        // El cuerpo es texto, salvo lo que bash ejecuta al expandirlo: las
+        // sustituciones de un heredoc sin comillas.
+        for (const { desde: a, hasta: b, literal } of cuerpo.cuerpos) if (!literal) sustituciones(a, b)
+        desde = cuerpo.fin
+        i = cuerpo.fin - 1
+      }
     } else if (c === '&' || c === '|') {
       // `&&` y `||` son un solo operador; `|&` es una tuberia (con stderr).
       const largo = comando[i + 1] === c || (c === '|' && comando[i + 1] === '&') ? 2 : 1
@@ -185,6 +303,14 @@ export function palabras(segmento, shell = 'bash') {
       actual = ''
       hay = false
     } else {
+      // Una redireccion pegada al final de una palabra (`main>/dev/null`,
+      // `main&>log`) no es parte de ella: `git push origin main>/dev/null`
+      // sube main. El numero de descriptor (`2>`) si va con la redireccion.
+      const redirige = c === '>' || c === '<' || (c === '&' && segmento[i + 1] === '>')
+      if (redirige && hay && profundidad === 0 && !enBackticks && !(shell === 'powershell' ? /^(\d+|&|\*)$/ : /^(\d+|&)$/).test(actual) && !/[<>&]$/.test(actual)) {
+        crudas.push(actual)
+        actual = ''
+      }
       if (c === '(') profundidad++
       else if (c === ')' && profundidad > 0) profundidad--
       else if (c === '`' && shell === 'bash') enBackticks = !enBackticks
@@ -196,7 +322,7 @@ export function palabras(segmento, shell = 'bash') {
 
   const sinRedireccion = []
   for (let i = 0; i < crudas.length; i++) {
-    const m = crudas[i].match(/^(\d*|&)?(>>?|<)(&\d+|&-)?(.*)$/)
+    const m = crudas[i].match(/^(\d*|&|\*)?(>>?|<)(&\d+|&-)?(.*)$/)
     if (m) {
       if (!m[3] && m[4] === '') i++ // operador solo: la palabra siguiente es el archivo
       continue
@@ -262,8 +388,11 @@ export function comandoEfectivo(palabrasDelSegmento) {
     const nombre = p[0].replace(/^.*[\\/]/, '').replace(/\.exe$/i, '').toLowerCase()
     if (!ENVOLTORIOS.has(nombre)) break
     if (nombre === 'xargs') viaXargs = true
-    envoltorios.push(nombre)
+    // Escrito con su ruta (`/usr/bin/time`) es un programa aparte, no el del shell.
+    envoltorios.push(/[\\/]/.test(p[0]) ? p[0] : nombre)
     p.shift()
+    // `command -v git` solo dice donde esta git: no ejecuta nada.
+    if (nombre === 'command' && /^-[vV]$/.test(p[0] ?? '')) return { p: [], viaXargs, envoltorios }
     // Opciones del envoltorio, asignaciones de env y duraciones de timeout/nice.
     while (p.length && (p[0].startsWith('-') || /^[A-Za-z_][A-Za-z0-9_]*=/.test(p[0]) || /^\d+(\.\d+)?[smhd]?$/.test(p[0]))) p.shift()
   }
@@ -284,7 +413,8 @@ export function comandoAnidado(p, shell = 'bash') {
     return i !== -1 && p[i + 1] != null ? { comando: p.slice(i + 1).join(' '), shell: 'powershell' } : null
   }
   if (ES_CMD.test(primero)) {
-    const i = p.findIndex((w, k) => k > 0 && /^\/[ck]$/i.test(w))
+    // `//c`: asi hay que escribirlo desde Git Bash, que si no convierte `/c` en una ruta.
+    const i = p.findIndex((w, k) => k > 0 && /^\/\/?[ck]$/i.test(w))
     return i !== -1 && p[i + 1] != null ? { comando: p.slice(i + 1).join(' '), shell: 'cmd' } : null
   }
   return null
@@ -336,16 +466,17 @@ function rutaExpandida(actual, destino) {
   return rutaNativa(destino.replace(HOGAR, () => os.homedir()).replace(AQUI, () => actual))
 }
 
-// La carpeta a la que lleva `cd <destino>` (o `git -C <destino>`) desde
-// `actual`, o null si el destino sale de una variable o de una sustitucion y no
-// se puede leer del texto.
-function carpetaTrasCd(actual, destino) {
-  const expandida = rutaExpandida(actual, destino)
-  const ruta = path.resolve(actual, expandida)
-  return DINAMICO_EN_RUTA.test(expandida) && !esCarpeta(ruta) ? null : ruta
-}
-
 const dudaDeCarpeta = (motivo) => `no se sabe en que carpeta corre (${motivo})`
+
+// `$CLAUDE_PROJECT_DIR` es la raiz del proyecto de la sesion. Claude Code se la
+// pasa a sus hooks, pero no al shell de sus comandos: ahi `cd
+// "$CLAUDE_PROJECT_DIR"` es `cd ""`, que no mueve nada. No se sabe cual de las
+// dos vale, pero las dos carpetas se conocen: esta es la otra.
+const PROYECTO = /^(\$CLAUDE_PROJECT_DIR|\$\{CLAUDE_PROJECT_DIR(:-\.?)?\}|\$env:CLAUDE_PROJECT_DIR|%CLAUDE_PROJECT_DIR%)(?=$|[\\/])/i
+function enElProyecto(destino) {
+  const variable = destino.match(PROYECTO)?.[0]
+  return variable ? path.join(process.env.CLAUDE_PROJECT_DIR || RAIZ_DEL_HOOK, destino.slice(variable.length)) : null
+}
 
 // Topes para lo que ningun comando real alcanza. Sin ellos, un comando con miles
 // de `cd a` o de `pushd a` alarga la ruta (o la pila) en cada paso, leerlo cuesta
@@ -354,66 +485,83 @@ const dudaDeCarpeta = (motivo) => `no se sabe en que carpeta corre (${motivo})`
 const RUTA_MAXIMA = 4096
 const PILA_MAXIMA = 256
 
-// Aplica un `cd`, `pushd` o `popd` al estado de carpeta `e`, si de verdad
-// cambia la carpeta de lo que viene despues, y devuelve true si la cambio. No la
-// cambia el que corre en otro proceso: detras de un envoltorio que no es del
-// shell (`nohup cd x`), dentro de una tuberia (`cd x | tee log`) o mandado al
-// fondo (`cd x &`). Cuando no se puede saber, deja la carpeta como estaba y
-// anota el motivo en `e.duda`: prePushMain pregunta en vez de adivinar.
-function cambiarDeCarpeta(e, p, { antes, despues, envoltorios, shell }) {
+// El estado de carpeta mientras se lee un comando: donde se esta (`carpeta`);
+// el motivo, si eso no se sabe con certeza (`duda`), y entonces la otra carpeta
+// en la que puede estar, si se conoce (`alternativa`); el lugar anterior, para
+// `cd -`; y los que apilo `pushd`. Un lugar es { carpeta, duda, alternativa }.
+const lugarDe = (e) => ({ carpeta: e.carpeta, duda: e.duda, alternativa: e.alternativa })
+const copiaDe = (e) => ({ ...e, pila: [...e.pila] })
+const mismoLugar = (a, b) => a.carpeta === b.carpeta && a.duda === b.duda && a.pila.length === b.pila.length
+// Deja `e` como `otro` sin cambiar de objeto: un `eval` lo comparte con quien lo llama.
+const volverA = (e, otro) => Object.assign(e, otro, { pila: [...otro.pila] })
+
+// Un `cd` (o un `eval`) cambia la carpeta de lo que viene despues solo si corre
+// en el mismo proceso: no detras de un envoltorio que no es del shell (`nohup cd
+// x`), ni dentro de una tuberia (`cd x | tee log`), ni mandado al fondo (`cd x
+// &`). 'depende': el ultimo comando de una tuberia corre en el shell actual en
+// zsh y en un subshell en bash.
+function correAca({ antes, despues, envoltorios, shell }) {
+  if (!envoltorios.every((x) => ENVOLTORIOS_DEL_SHELL.has(x))) return 'no'
+  if (despues === '&') return 'no'
+  if (shell !== 'powershell' && despues === '|') return 'no'
+  if (shell === 'cmd' && antes === '|') return 'no'
+  return shell === 'bash' && antes === '|' ? 'depende' : 'si'
+}
+
+// Aplica un `cd`, `pushd` o `popd` al estado de carpeta `e`, y devuelve true si
+// lo cambio. Cuando no se puede saber adonde lleva (`cd "$DESTINO"`), deja la
+// carpeta como estaba y anota el motivo en `e.duda`: prePushMain pregunta en
+// vez de adivinar. `cd -` y `popd` vuelven a lo que se sabia.
+function cambiarDeCarpeta(e, p, contexto) {
   const nombre = p[0]
-  if (!envoltorios.every((x) => ENVOLTORIOS_DEL_SHELL.has(x))) return false
-  if (despues === '&') return false
-  // En PowerShell una tuberia corre en el mismo proceso; en bash y en cmd, no.
-  if (shell !== 'powershell' && despues === '|') return false
-  if (shell === 'cmd' && antes === '|') return false
-  if (shell === 'bash' && antes === '|') {
-    // El ultimo comando de una tuberia corre en el shell actual en zsh y en un
-    // subshell en bash.
-    e.duda = dudaDeCarpeta(`\`${nombre}\` cierra una tuberia, y que cambie o no la carpeta depende del shell`)
-    return false
+  const corre = correAca(contexto)
+  if (corre === 'no') return false
+  const dudar = (motivo) => {
+    e.duda = dudaDeCarpeta(motivo)
+    e.alternativa = null
+    return true
   }
-  const mover = (nueva) => {
-    e.anterior = e.carpeta
-    e.carpeta = nueva
+  if (corre === 'depende') return dudar(`\`${nombre}\` cierra una tuberia, y que cambie o no la carpeta depende del shell`)
+  const ir = (lugar) => {
+    e.anterior = lugarDe(e)
+    Object.assign(e, { alternativa: null }, lugar)
     return true
   }
   // Cada comando corre en un shell nuevo: sin un pushd previo en el mismo
   // comando, la pila esta vacia y `popd` falla sin mover nada.
-  if (ES_POPD.test(nombre)) return e.pila.length ? mover(e.pila.pop()) : false
-  const args = p.slice(1).filter((x) => !(shell === 'cmd' && /^\/d$/i.test(x)))
-  if (ES_PUSHD.test(nombre) && args.some((x) => /^[+-]\d+$/.test(x))) {
-    e.duda = dudaDeCarpeta(`\`${p.join(' ')}\` rota una pila de carpetas que este comando no deja ver`)
-    return false
-  }
+  if (ES_POPD.test(nombre)) return e.pila.length ? ir(e.pila.pop()) : false
+  const args = p.slice(1).filter((x) => !(contexto.shell === 'cmd' && /^\/d$/i.test(x)))
+  const apila = ES_PUSHD.test(nombre)
+  if (apila && args.some((x) => /^[+-]\d+$/.test(x))) return dudar(`\`${p.join(' ')}\` rota una pila de carpetas que este comando no deja ver`)
   const destino = args.find((x) => !x.startsWith('-'))
   if (destino == null) {
-    if (ES_PUSHD.test(nombre)) {
+    if (apila) {
       // `pushd` a secas intercambia la carpeta actual con la ultima apilada.
       if (!e.pila.length) return false
       const tope = e.pila.pop()
-      e.pila.push(e.carpeta)
-      return mover(tope)
+      e.pila.push(lugarDe(e))
+      return ir(tope)
     }
     if (!args.includes('-')) return false
-    if (e.anterior != null) return mover(e.anterior)
-    e.duda = dudaDeCarpeta(`\`${nombre} -\` vuelve a una carpeta que este comando no nombra`)
-    return false
+    return e.anterior ? ir(e.anterior) : dudar(`\`${nombre} -\` vuelve a una carpeta que este comando no nombra`)
   }
   const expandida = rutaExpandida(e.carpeta, destino)
   const ruta = path.resolve(e.carpeta, expandida)
-  if (DINAMICO_EN_RUTA.test(expandida) && !esCarpeta(ruta)) {
-    e.duda = dudaDeCarpeta(`el destino de \`${nombre} ${destino}\` se resuelve recien al ejecutar`)
-    return false
+  const dinamica = DINAMICO_EN_RUTA.test(expandida) && !esCarpeta(ruta)
+  if ((!dinamica && ruta.length > RUTA_MAXIMA) || (apila && e.pila.length >= PILA_MAXIMA)) {
+    return dudar(`tras \`${nombre}\` la ruta o la pila de carpetas pasa de lo que este hook sigue`)
   }
-  if (ruta.length > RUTA_MAXIMA || (ES_PUSHD.test(nombre) && e.pila.length >= PILA_MAXIMA)) {
-    e.duda = dudaDeCarpeta(`tras \`${nombre}\` la ruta o la pila de carpetas pasa de lo que este hook sigue`)
-    return false
+  if (apila) e.pila.push(lugarDe(e))
+  if (dinamica) {
+    e.anterior = lugarDe(e)
+    dudar(`el destino de \`${nombre} ${destino}\` se resuelve recien al ejecutar`)
+    e.alternativa = enElProyecto(destino)
+    return true
   }
-  if (ES_PUSHD.test(nombre)) e.pila.push(e.carpeta)
-  // Una ruta absoluta vuelve a dejar en claro donde se esta.
-  if (path.isAbsolute(expandida)) e.duda = null
-  return mover(ruta)
+  // Una ruta absoluta deja en claro donde se esta; una relativa hereda la duda
+  // (y mueve igual la carpeta alternativa).
+  if (path.isAbsolute(expandida)) return ir({ carpeta: ruta, duda: null })
+  return ir({ carpeta: ruta, duda: e.duda, alternativa: e.alternativa && path.resolve(e.alternativa, expandida) })
 }
 
 // `$(git branch --show-current)` y sus equivalentes SI se pueden leer del
@@ -431,49 +579,143 @@ const SUSTITUCION_DE_LA_RAIZ_DEL_REPO = new RegExp(String.raw`\$\(\s*${RAIZ_DEL_
 // expresion (`git push $(echo origin) main`) se lee entero, con lo que sigue al
 // cierre: `main` es parte del mismo comando.
 const SE_LEE = [ES_CD, ES_PUSHD, ES_POPD, ES_GIT, ES_GH, ES_LANZADOR, ES_SHELL, ES_POWERSHELL, ES_CMD, ES_EVAL]
+const seLee = (nombre) => SE_LEE.some((forma) => forma.test(nombre ?? ''))
 // Lo que queda en lugar de una expresion que no se pudo leer entera (sin cierre,
 // o en un comando tan anidado que releerlo no entra en el plazo del hook). Como
 // argumento de un push cuenta como algo que se resuelve recien al ejecutar.
 const EXPRESION_SIN_LEER = '$(...)'
 
+// Las palabras con las que bash arma sus bloques. Lo de adentro de un bloque
+// puede no correr (el `then` de un `if`, el cuerpo de un bucle).
+const ABRE_BLOQUE = new Set(['if', 'while', 'until', 'for', 'select', 'case'])
+const CIERRA_BLOQUE = new Set(['fi', 'done', 'esac'])
+const SIGUE_BLOQUE = new Set(['then', 'do', 'else', 'elif', '!', '{', '}'])
+
+// Las palabras de estructura con las que empieza una pieza (`then`, `fi`,
+// `{`...), hasta la primera que abre un bloque o que ya es un comando.
+function estructuraDe(crudas) {
+  const salida = []
+  for (const palabra of crudas) {
+    if (ABRE_BLOQUE.has(palabra)) return [...salida, palabra]
+    if (!CIERRA_BLOQUE.has(palabra) && !SIGUE_BLOQUE.has(palabra)) break
+    salida.push(palabra)
+  }
+  return salida
+}
+
+// Cuantos bloques de script de PowerShell abre y cierra una pieza. `${var}` y
+// `@{...}` no son bloques.
+function llavesDe(crudas) {
+  const texto = crudas.join(' ').replace(/[$@]\{[^{}]*\}/g, '')
+  return { abre: texto.split('{').length - 1, cierra: texto.split('}').length - 1 }
+}
+
 // Cada comando que el texto ejecuta: `p` (sus palabras, sin lo que lo
 // envuelve), la `carpeta` en la que corre y `duda`, el motivo cuando esa
-// carpeta no se puede saber con certeza. Mira a traves de envoltorios (`command
-// git push`), agrupaciones (`(git push)`, `if ...; then git push; fi`) y
-// comandos anidados (`bash -c`, `eval`), y sigue los `cd`, `pushd` y `popd`.
+// carpeta no se puede saber con certeza (con `alternativa`, la otra carpeta
+// posible, si se conoce). Mira a traves de envoltorios (`command git push`),
+// agrupaciones (`(git push)`, `if ...; then git push; fi`) y comandos anidados
+// (`bash -c`, `eval`), y sigue los `cd`, `pushd` y `popd`.
 //
-// La carpeta la mueve solo el `cd` que llega a lo que viene despues. En bash,
-// el de un subshell o una sustitucion -- `(cd x)`, `$(cd x)` -- termina con
-// ella: al cerrar el parentesis vuelve la carpeta de antes. En PowerShell y en
-// cmd un parentesis no abre otro proceso, y ese `cd` queda.
-function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, duda = null } = {}) {
+// La carpeta la mueve solo el `cd` que llega a lo que viene despues:
+// - En bash, el de un subshell o una sustitucion -- `(cd x)`, `$(cd x)` --
+//   termina con ella: al cerrar el parentesis vuelve la carpeta de antes. En
+//   PowerShell y en cmd un parentesis no abre otro proceso, y ese `cd` queda.
+// - El que puede no haber corrido -- el de un `if`, un bucle, un `case` o el
+//   cuerpo de una funcion, o el que sigue a un `&&` -- vale para lo que lo
+//   acompania adentro; al salir ya no se sabe donde se esta, y queda en duda.
+function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, pasos = null } = {}) {
   const texto = comando.replace(SUSTITUCION_DE_LA_RAMA_ACTUAL, 'HEAD').replace(SUSTITUCION_DE_LA_RAIZ_DEL_REPO, '.')
   const piezas = piezasDe(texto, shell)
-  // Para cada pieza que abre una expresion, la pieza en la que esa expresion cierra.
+  // Un comando anidado se vuelve a leer en cada nivel (`eval (eval (...`): el
+  // total de piezas leidas queda acotado, y lo que no se alcanza a leer se
+  // pregunta. Un hook que se pasa de su plazo no frena nada.
+  pasos ??= { quedan: piezas.length * 4 + 5_000 }
+  pasos.quedan -= piezas.length
+
+  // Las palabras de cada pieza y, para cada pieza que abre una expresion, la
+  // pieza en la que cierra. El `)` de un patron de `case` no cierra nada: tomado
+  // por el de un subshell, deshacia su `cd` antes de tiempo.
   const cierreDe = new Map()
   const abiertas = []
+  const cases = []
   piezas.forEach((pieza, k) => {
+    pieza.crudas = pieza.texto.trim() ? palabras(pieza.texto, shell) : []
+    if (shell === 'bash') {
+      for (const palabra of estructuraDe(pieza.crudas)) {
+        if (palabra === 'case') cases.push(abiertas.length)
+        else if (palabra === 'esac') cases.pop()
+      }
+    }
     if (ABRE.has(pieza.corte)) abiertas.push(k)
+    else if (pieza.corte === ')' && cases.length && abiertas.length === cases.at(-1)) pieza.corte = ';'
     else if (CIERRA.has(pieza.corte) && abiertas.length) cierreDe.set(abiertas.pop(), k)
   })
 
-  let e = estado ?? { carpeta: cwd, anterior: null, pila: [], duda }
+  let e = estado ?? { carpeta: cwd, duda: null, alternativa: null, anterior: null, pila: [] }
   const ambitos = []
+  // Lo que puede no haber corrido y sigue abierto, con el estado al entrar.
+  let regiones = []
+  let esperaCuerpo = false // tras `f()` o `function f`, el `{` que sigue abre el cuerpo de una funcion
+  let llaves = 0 // bloques de script de PowerShell abiertos
   const yaLeidas = new Set()
   // Releer entero un comando cortado cuesta su largo; el total queda acotado.
   let porReleer = texto.length * 4 + 10_000
   let siFallo = null
   let antes = ''
+
+  const salirDe = (region) => {
+    if (mismoLugar(e, region.estado)) return
+    const adentro = e.duda ? null : e.carpeta
+    volverA(e, region.estado)
+    if (e.duda) return
+    e.duda = dudaDeCarpeta('un `cd` anterior corre solo si se cumple una condicion')
+    e.alternativa = adentro
+  }
+  const cerrarHasta = (tipo) => {
+    const i = regiones.findLastIndex((region) => region.tipo === tipo)
+    if (i !== -1) for (const region of regiones.splice(i).reverse()) salirDe(region)
+  }
+  const entrar = (tipo, extra = {}) => regiones.push({ tipo, estado: copiaDe(e), ...extra })
+  // Lo que sigue a un `&&` o a un `||` corre solo si lo anterior salio de cierta manera.
+  const entrarEnLista = () => {
+    if ((antes === '&&' || antes === '||') && regiones.at(-1)?.tipo !== 'lista') entrar('lista')
+  }
+
   for (let k = 0; k < piezas.length; k++) {
     const pieza = piezas[k]
     if (!yaLeidas.has(k) && pieza.texto.trim()) {
-      let { p, viaXargs, envoltorios } = comandoEfectivo(palabras(pieza.texto, shell))
+      const crudas = pieza.crudas
+      // Con el `;` termina la lista: lo que seguia a su `&&` ya no acompania al `cd`.
+      if (antes === ';' || antes === '&' || antes === '') while (regiones.at(-1)?.tipo === 'lista') salirDe(regiones.pop())
+
+      if (shell === 'bash') {
+        for (const palabra of estructuraDe(crudas)) {
+          if (ABRE_BLOQUE.has(palabra)) entrar('bloque')
+          else if (CIERRA_BLOQUE.has(palabra)) cerrarHasta('bloque')
+          else if (palabra === '{' && esperaCuerpo) entrar('funcion', { llaves: 1 })
+          else if (palabra === '{' || palabra === '}') {
+            const funcion = regiones.findLast((region) => region.tipo === 'funcion')
+            if (funcion && (funcion.llaves += palabra === '{' ? 1 : -1) === 0) cerrarHasta('funcion')
+          }
+          if (palabra === '{') esperaCuerpo = false
+        }
+        if (crudas[0] === 'function' && crudas.includes('{')) entrar('funcion', { llaves: 1 })
+      } else if (shell === 'powershell') {
+        const { abre, cierra } = llavesDe(crudas)
+        if (llaves === 0 && abre > 0) entrar('llaves')
+        llaves = Math.max(0, llaves + abre - cierra)
+      }
+
+      let leido = comandoEfectivo(crudas)
       let despues = pieza.corte
-      // Los parentesis vacios son los de una definicion de funcion (`git() { ... }`),
-      // no una expresion: lo que sigue es su cuerpo, y se lee como comandos.
-      const defineFuncion = cierreDe.get(k) === k + 1 && !piezas[k + 1].texto.trim()
-      if (ABRE.has(pieza.corte) && !defineFuncion && SE_LEE.some((forma) => forma.test(p[0] ?? ''))) {
-        // Lo corto una expresion: sigue despues de su cierre, y del de las que vengan.
+      // Los parentesis vacios tras un nombre son los de una definicion de funcion
+      // (`git() { ... }`), no una expresion: lo que sigue es su cuerpo.
+      const defineFuncion = pieza.corte === '(' && cierreDe.get(k) === k + 1 && !piezas[k + 1].texto.trim() && crudas.length === 1 && !/[$@]$/.test(pieza.texto.trimEnd())
+      if (ABRE.has(pieza.corte) && !defineFuncion) {
+        // Lo corto una expresion: el comando sigue despues de su cierre, y del de
+        // las que vengan. Se lee entero si asi resulta ser uno de los que se leen
+        // (`PATH=$(pwd)/bin:$PATH git push origin main` lo es recien entero).
         const continuaciones = []
         let fin = k
         while (fin != null && ABRE.has(piezas[fin].corte)) {
@@ -482,39 +724,69 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, d
           if (fin != null) continuaciones.push(fin)
         }
         const largo = fin == null ? Infinity : piezas[fin].hasta - pieza.desde
+        let entero = null
         if (largo <= porReleer) {
           porReleer -= largo
-          for (const j of continuaciones) yaLeidas.add(j)
-          ;({ p, viaXargs, envoltorios } = comandoEfectivo(palabras(texto.slice(pieza.desde, piezas[fin].hasta), shell)))
+          entero = comandoEfectivo(palabras(texto.slice(pieza.desde, piezas[fin].hasta), shell))
+        }
+        if (entero && seLee(entero.p[0])) {
+          leido = entero
           despues = piezas[fin].corte
-        } else {
-          p = [...p, EXPRESION_SIN_LEER]
+          for (const j of continuaciones) yaLeidas.add(j)
+        } else if (seLee(leido.p[0])) {
+          // Sin cierre, o sin presupuesto para releerlo: queda constancia de que
+          // lo completa una expresion que no se leyo.
+          leido = { ...leido, p: [...leido.p, EXPRESION_SIN_LEER] }
         }
       }
+
+      const { p, viaXargs, envoltorios } = leido
+      const nombre = p[0] ?? ''
+      const contexto = { antes, despues, envoltorios, shell }
       // Lo que sigue a `cd x ||` corre solo si ese cd fallo: en la carpeta de antes.
       const aqui = siFallo ?? e
       siFallo = null
-      const nombre = p[0] ?? ''
       if (ES_CD.test(nombre) || ES_PUSHD.test(nombre) || ES_POPD.test(nombre)) {
-        const previo = despues === '||' ? { ...e, pila: [...e.pila] } : null
-        if (cambiarDeCarpeta(e, p, { antes, despues, envoltorios, shell }) && previo) siFallo = previo
+        entrarEnLista()
+        const previo = despues === '||' ? copiaDe(e) : null
+        if (cambiarDeCarpeta(e, p, contexto) && previo) siFallo = previo
       } else {
         const anidado = nivel < PROFUNDIDAD_MAXIMA ? comandoAnidado(p, shell) : null
-        if (anidado) {
-          // `eval` e `iex` corren en este mismo shell y su `cd` queda; el de
-          // `bash -c "cd x"` termina con ese proceso.
-          yield* comandosDe(anidado.comando, aqui.carpeta, anidado.shell, nivel + 1, ES_EVAL.test(nombre) ? { estado: aqui } : { duda: aqui.duda })
+        // `eval` e `iex` corren en este mismo shell y su `cd` queda -- si el
+        // propio `eval` corre aca: no en una tuberia ni al fondo. El de
+        // `bash -c "cd x"` termina con ese proceso.
+        const comparte = anidado && ES_EVAL.test(nombre) ? correAca(contexto) : 'no'
+        if (anidado && pasos.quedan <= 0) {
+          // Sin presupuesto para leerlo: queda, una vez, como un push que no se pudo leer.
+          if (!pasos.avisado) yield { p: ['git', 'push', EXPRESION_SIN_LEER], viaXargs: false, ...lugarDe(aqui) }
+          pasos.avisado = true
+        } else if (anidado && comparte === 'si') {
+          entrarEnLista()
+          const previo = despues === '||' ? copiaDe(aqui) : null
+          yield* comandosDe(anidado.comando, aqui.carpeta, anidado.shell, nivel + 1, { estado: aqui, pasos })
+          if (previo && !mismoLugar(aqui, previo)) siFallo = previo
+        } else if (anidado) {
+          const adentro = copiaDe(aqui)
+          yield* comandosDe(anidado.comando, aqui.carpeta, anidado.shell, nivel + 1, { estado: adentro, pasos })
+          if (comparte === 'depende' && !mismoLugar(adentro, aqui)) {
+            e.duda = dudaDeCarpeta(`\`${nombre}\` cierra una tuberia, y que su \`cd\` quede o no depende del shell`)
+            e.alternativa = null
+          }
         } else if (p.length) {
-          yield { p, viaXargs, carpeta: aqui.carpeta, duda: aqui.duda }
+          yield { p, viaXargs, ...lugarDe(aqui) }
         }
       }
+
+      if (shell === 'bash') esperaCuerpo = defineFuncion || (crudas[0] === 'function' && !crudas.includes('{'))
+      else if (shell === 'powershell' && llaves === 0) cerrarHasta('llaves')
     }
     if (shell === 'bash') {
       if (ABRE.has(pieza.corte)) {
-        ambitos.push(e)
-        e = { ...e, pila: [...e.pila] }
+        ambitos.push({ e, regiones, esperaCuerpo })
+        e = copiaDe(e)
+        regiones = []
       } else if (CIERRA.has(pieza.corte) && ambitos.length) {
-        e = ambitos.pop()
+        ;({ e, regiones, esperaCuerpo } = ambitos.pop())
       }
     }
     antes = pieza.corte
@@ -527,12 +799,12 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, d
 // que se sube (xargs, un alias de git definido en la misma linea, un programa
 // que lo lanza); `duda`, cuando no alcanza para saber en que carpeta corre.
 function* pushes(comando, cwd, shell = 'bash') {
-  for (const { p, viaXargs, carpeta, duda: dudaPrevia } of comandosDe(comando, cwd, shell)) {
+  for (const { p, viaXargs, carpeta, duda: dudaPrevia, alternativa: otraPrevia } of comandosDe(comando, cwd, shell)) {
     if (ES_LANZADOR.test(p[0])) {
       // `start git push origin main`, `Start-Process git -ArgumentList push,origin,main`:
       // lo que se alcanza a leer decide si toca main; el resto se pregunta.
       const lanzado = pushLanzado(p.slice(1))
-      if (lanzado) yield { dir: carpeta, args: lanzado, incierto: `lo lanza \`${p[0]}\`, que no deja leer sus argumentos con certeza`, duda: dudaPrevia }
+      if (lanzado) yield { dir: carpeta, args: lanzado, incierto: `lo lanza \`${p[0]}\`, que no deja leer sus argumentos con certeza`, duda: dudaPrevia, alternativa: otraPrevia }
       continue
     }
     if (!ES_GIT.test(p[0])) continue
@@ -540,12 +812,23 @@ function* pushes(comando, cwd, shell = 'bash') {
     let i = 1
     let dir = carpeta
     let duda = dudaPrevia
+    let alternativa = otraPrevia
     let alias = false
     while (i < p.length && p[i].startsWith('-')) {
       if (p[i] === '-C') {
-        const ruta = carpetaTrasCd(dir, p[i + 1] ?? '.')
-        if (ruta == null) duda ??= dudaDeCarpeta(`la ruta de \`git -C ${p[i + 1]}\` se resuelve recien al ejecutar`)
-        else dir = ruta
+        const destino = p[i + 1] ?? '.'
+        const expandida = rutaExpandida(dir, destino)
+        const ruta = path.resolve(dir, expandida)
+        if (DINAMICO_EN_RUTA.test(expandida) && !esCarpeta(ruta)) {
+          // Con una duda anterior ya no hay una sola carpeta alternativa que seguir.
+          alternativa = duda ? null : enElProyecto(destino)
+          duda ??= dudaDeCarpeta(`la ruta de \`git -C ${destino}\` se resuelve recien al ejecutar`)
+        } else {
+          // Una ruta absoluta no depende de donde se este.
+          if (path.isAbsolute(expandida)) duda = null
+          alternativa = duda && alternativa ? path.resolve(alternativa, expandida) : null
+          dir = ruta
+        }
         i += 2
       } else if (['-c', '--git-dir', '--work-tree', '--namespace'].includes(p[i])) {
         if (p[i] === '-c' && /^alias\./i.test(p[i + 1] ?? '')) alias = true
@@ -557,12 +840,12 @@ function* pushes(comando, cwd, shell = 'bash') {
     if (p[i] !== 'push') {
       // `git send-pack <remoto> <ref>...` es la forma interna de `git push`: se lee
       // igual, y se pregunta si no toca main.
-      if (p[i] === 'send-pack') yield { dir, args: p.slice(i + 1), incierto: 'usa `git send-pack`, la forma interna de `git push`', duda }
+      if (p[i] === 'send-pack') yield { dir, args: p.slice(i + 1), incierto: 'usa `git send-pack`, la forma interna de `git push`', duda, alternativa }
       // `git -c alias.p=push p origin main`: el subcomando real no se ve.
-      else if (alias) yield { dir, args: [], incierto: 'usa un alias de git definido en la misma linea', duda }
+      else if (alias) yield { dir, args: [], incierto: 'usa un alias de git definido en la misma linea', duda, alternativa }
       continue
     }
-    yield { dir, args: p.slice(i + 1), incierto: viaXargs ? 'sus argumentos llegan por xargs' : null, duda }
+    yield { dir, args: p.slice(i + 1), incierto: viaXargs ? 'sus argumentos llegan por xargs' : null, duda, alternativa }
   }
 }
 
@@ -591,47 +874,58 @@ export function pushForzado(args) {
   return null
 }
 
-// Lo que el primer `git push` del comando subiria, o null si no sube commits:
-// los borrados de ramas remotas y los comandos sin push no llevan check de
-// secretos. `cabezas` son las revs cuyos commits sin pushear hay que revisar:
-// la rama o el tag del refspec, HEAD por defecto, y --branches / --tags para
-// --all, --mirror y --tags (un tag sobre un commit sin pushear tambien lo sube).
-export function pushDelComando(comando, cwd, shell = 'bash') {
-  for (const { dir, args } of pushes(comando, cwd, shell)) {
-    const posicionales = []
-    const extra = []
-    for (let j = 0; j < args.length; j++) {
-      const arg = args[j]
-      if (arg === '--delete' || arg === '-d') return null
-      if (arg === '--tags' || arg === '--follow-tags') extra.push('--tags')
-      if (arg === '--all' || arg === '--branches') extra.push('--branches')
-      if (arg === '--mirror') extra.push('--branches', '--tags')
-      if (OPCIONES_PUSH_CON_VALOR.has(arg)) {
-        j++
-      } else if (!arg.startsWith('-')) {
-        posicionales.push(arg)
-      }
+// Las revs cuyos commits sin pushear hay que revisar antes de un `git push`
+// con esos argumentos: la rama o el tag del refspec, HEAD por defecto, y
+// --branches / --tags para --all, --mirror y --tags (un tag sobre un commit sin
+// pushear tambien lo sube). Vacio si no sube commits (borra una rama remota).
+function cabezasDe(args) {
+  const posicionales = []
+  const extra = []
+  for (let j = 0; j < args.length; j++) {
+    const arg = args[j]
+    if (arg === '--delete' || arg === '-d') return []
+    if (arg === '--tags' || arg === '--follow-tags') extra.push('--tags')
+    if (arg === '--all' || arg === '--branches') extra.push('--branches')
+    if (arg === '--mirror') extra.push('--branches', '--tags')
+    if (OPCIONES_PUSH_CON_VALOR.has(arg)) {
+      j++
+    } else if (!arg.startsWith('-')) {
+      posicionales.push(arg)
     }
-    const refspecs = posicionales.slice(1)
-    const cabezas = []
-    for (const refspec of refspecs) {
-      if (REFSPEC_MATCHING.test(refspec)) {
-        extra.push('--branches')
-        continue
-      }
-      if (refspec.startsWith(':')) continue // borrar la rama remota
-      const origen = refspec.replace(/^\+/, '').split(':')[0]
-      // Un origen que se resuelve recien al ejecutar (`$RAMA`, `$(...)`) no se
-      // puede revisar: se revisa HEAD, lo mas probable. Ese push ya se pregunta.
-      cabezas.push(origen === '' || origen === '@' || DINAMICO.test(origen) || EXPRESION.test(origen) ? 'HEAD' : origen)
-    }
-    // Sin refspec, push de la rama actual; --tags solo, en cambio, no la sube.
-    if (refspecs.length === 0 && !extra.includes('--branches') && !(extra.includes('--tags') && !args.includes('--follow-tags'))) {
-      cabezas.push('HEAD')
-    }
-    cabezas.push(...extra)
-    return cabezas.length ? { dir, cabezas: [...new Set(cabezas)] } : null
   }
+  const refspecs = posicionales.slice(1)
+  const cabezas = []
+  for (const refspec of refspecs) {
+    if (REFSPEC_MATCHING.test(refspec)) {
+      extra.push('--branches')
+      continue
+    }
+    if (refspec.startsWith(':')) continue // borrar la rama remota
+    const origen = refspec.replace(/^\+/, '').split(':')[0]
+    // Un origen que se resuelve recien al ejecutar (`$RAMA`, `$(...)`) no se
+    // puede revisar: se revisa HEAD, lo mas probable. Ese push ya se pregunta.
+    cabezas.push(origen === '' || origen === '@' || DINAMICO.test(origen) || EXPRESION.test(origen) ? 'HEAD' : origen)
+  }
+  // Sin refspec, push de la rama actual; --tags solo, en cambio, no la sube.
+  if (refspecs.length === 0 && !extra.includes('--branches') && !(extra.includes('--tags') && !args.includes('--follow-tags'))) {
+    cabezas.push('HEAD')
+  }
+  return [...new Set([...cabezas, ...extra])]
+}
+
+// Cada `git push` del comando que sube commits, con la carpeta en la que corre
+// y sus `cabezas`. Son todos, no solo el primero: `(cd <vault> && git push); git
+// push` sube tambien la rama del proyecto, y esa es la que lleva el check.
+function* pushesConCommits(comando, cwd, shell = 'bash') {
+  for (const { dir, args } of pushes(comando, cwd, shell)) {
+    const cabezas = cabezasDe(args)
+    if (cabezas.length) yield { dir, cabezas }
+  }
+}
+
+// El primero de ellos, o null si el comando no sube commits.
+export function pushDelComando(comando, cwd, shell = 'bash') {
+  for (const push of pushesConCommits(comando, cwd, shell)) return push
   return null
 }
 
@@ -652,7 +946,7 @@ const ramaCorta = (ref) => ref.replace(/^refs\/heads\//, '')
 // origin), que sirve para reconocer el Vault por su URL.
 export function destinosDelPush(comando, cwd, shell = 'bash') {
   const salida = []
-  for (const { dir, args, incierto: inciertoDelComando = null, duda = null } of pushes(comando, cwd, shell)) {
+  for (const { dir, args, incierto: inciertoDelComando = null, duda = null, alternativa = null } of pushes(comando, cwd, shell)) {
     const posicionales = []
     const destinos = []
     let soloTags = false
@@ -698,7 +992,7 @@ export function destinosDelPush(comando, cwd, shell = 'bash') {
     // argumentos llegan por otro lado (xargs, un alias, un lanzador).
     if (refspecs.length === 0 && destinos.length === 0 && !soloTags && !inciertoDelComando) destinos.push(RAMA_ACTUAL, UPSTREAM)
     if (destinos.length || incierto || forzado) {
-      salida.push({ dir, remoto: posicionales[0] ?? null, destinos: [...new Set(destinos)], incierto, forzado, borra: [...new Set(borra)], dudaDeCarpeta: duda })
+      salida.push({ dir, remoto: posicionales[0] ?? null, destinos: [...new Set(destinos)], incierto, forzado, borra: [...new Set(borra)], dudaDeCarpeta: duda, carpetaAlternativa: alternativa })
     }
   }
   return salida
@@ -926,6 +1220,16 @@ function preguntar(lineas) {
   }
 }
 
+// Si la duda es entre dos carpetas conocidas del mismo repo (`cd src && npm test
+// && cd ..; git push`: de fallar los tests, el push corre en src), para las
+// reglas da lo mismo en cual corre.
+function sinDudaEnElMismoRepo(push, correr) {
+  if (!push.dudaDeCarpeta || !push.carpetaAlternativa) return push
+  const [aca, alla] = [raizDelRepo(push.dir, correr), raizDelRepo(push.carpetaAlternativa, correr)]
+  if (!aca || !alla || !mismaCarpeta(aca, alla)) return push
+  return { ...push, dudaDeCarpeta: null, carpetaAlternativa: null, incierto: push.incierto === push.dudaDeCarpeta ? null : push.incierto }
+}
+
 export function prePushMain({ push, correr, vault, enSolo = enModoSolo }) {
   const raiz = raizDelRepo(push.dir, correr)
   if (raiz && enSolo(raiz)) return null
@@ -938,7 +1242,9 @@ export function prePushMain({ push, correr, vault, enSolo = enModoSolo }) {
   if (enElVault && !push.dudaDeCarpeta) return null
   if (!tocaMain || (enElVault && !push.destinos.includes(RAMA_PROTEGIDA))) {
     return preguntar([
-      `reglas-pr (SHS-M42): no se puede saber a que rama sube este push en ${raiz ?? push.dir}: ${push.incierto}.`,
+      push.dudaDeCarpeta && push.incierto === push.dudaDeCarpeta
+        ? `reglas-pr (SHS-M42): de este push ${push.dudaDeCarpeta}. Se evaluo en ${raiz ?? push.dir}, pero puede correr en otro repo.`
+        : `reglas-pr (SHS-M42): no se puede saber a que rama sube este push en ${raiz ?? push.dir}: ${push.incierto}.`,
       `\`${RAMA_PROTEGIDA}\` del proyecto solo recibe merges desde \`dev\` por PR. Confirma con el usuario que este push no la toca,`,
       push.dudaDeCarpeta
         ? 'o vuelve a escribirlo con la carpeta, el remoto y la rama literales (`cd <ruta> && git push origin <rama>`) para que no haga falta preguntar.'
@@ -995,6 +1301,12 @@ export function prePushBorrado({ push, correr, vault, enSolo = enModoSolo }) {
     'Confirma con el usuario antes de seguir; para borrar una rama de trabajo ya mergeada, nombra esa rama.',
   ])
 }
+
+// Cuantos pushes distintos de un mismo comando llevan check de secretos (cada
+// uno corre el script) y cuantos se evaluan contra las reglas de rama (cada uno
+// consulta a git): el hook tiene un plazo.
+const MAX_PUSHES_REVISADOS = 4
+const MAX_PUSHES_EVALUADOS = 25
 
 export function prePush({ push, raiz, correr }) {
   for (const cabeza of push.cabezas) {
@@ -1216,19 +1528,42 @@ export function procesar(entrada, correr = correrReal) {
     // Un deny corta; una pregunta (`ask`) queda pendiente por si mas abajo hay
     // un deny, que siempre gana.
     let pregunta = null
-    for (const push of destinosDelPush(comando, cwd, shell)) {
+    const evaluados = new Set()
+    for (const leido of destinosDelPush(comando, cwd, shell)) {
+      // Cada push distinto se evalua una vez (evaluarlo consulta a git), y hasta
+      // un tope: mas pushes que eso en un solo comando no se leen, se preguntan.
+      const clave = JSON.stringify(leido)
+      if (evaluados.has(clave)) continue
+      if (evaluados.size === MAX_PUSHES_EVALUADOS) {
+        pregunta ??= preguntar([`reglas-pr (SHS-M42): este comando hace mas de ${MAX_PUSHES_EVALUADOS} pushes distintos y no se revisaron todos. Confirma con el usuario, o separalo en comandos mas chicos.`])
+        break
+      }
+      evaluados.add(clave)
+      const push = sinDudaEnElMismoRepo(leido, correr)
       const decision = prePushMain({ push, correr, vault }) ?? prePushForzado({ push, correr }) ?? prePushBorrado({ push, correr, vault })
       if (esDeny(decision)) return decision
       pregunta ??= decision
     }
-    const push = pushDelComando(comando, cwd, shell)
-    const raiz = push && repoConReglas(push.dir, correr, { tambienEnSolo: true })
-    if (!raiz) return pregunta
-    // Secretos primero; con eso en orden, la frescura de docs/metodologia
-    // (solo en el repo del generador, SHS-M16). Un aviso de "no se pudo validar"
-    // viaja junto con la pregunta, si la hay.
-    const validacion = prePush({ push, raiz, correr }) ?? preDocsMetodologia(correr, { raizPush: raiz })
-    if (esDeny(validacion) || !pregunta) return validacion
+    // Secretos, en cada repo con reglas al que el comando pushea; con eso en
+    // orden, la frescura de docs/metodologia (solo en el repo del generador,
+    // SHS-M16). Un aviso de "no se pudo validar" viaja junto con la pregunta, si
+    // la hay.
+    let validacion = null
+    const revisados = new Set()
+    for (const push of pushesConCommits(comando, cwd, shell)) {
+      const raiz = repoConReglas(push.dir, correr, { tambienEnSolo: true })
+      const clave = `${raiz}\n${push.cabezas.join('\n')}`
+      if (!raiz || revisados.has(clave)) continue
+      if (revisados.size === MAX_PUSHES_REVISADOS) {
+        validacion ??= { systemMessage: `reglas-pr: el comando hace mas de ${MAX_PUSHES_REVISADOS} pushes distintos; en los demas no se validaron secretos.` }
+        break
+      }
+      revisados.add(clave)
+      const resultado = prePush({ push, raiz, correr }) ?? preDocsMetodologia(correr, { raizPush: raiz })
+      if (esDeny(resultado)) return resultado
+      validacion ??= resultado
+    }
+    if (!pregunta) return validacion
     return validacion?.systemMessage ? { ...pregunta, systemMessage: validacion.systemMessage } : pregunta
   }
   if (entrada.hook_event_name === 'PostToolUse') {

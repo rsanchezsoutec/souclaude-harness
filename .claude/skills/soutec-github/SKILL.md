@@ -203,6 +203,9 @@ checks de `scripts/check-pr-rules.mjs` y te da el resultado antes que CI:
   `cd "$DESTINO"`), o si el push es forzado o borra `dev`, no adivina y
   **pregunta** al usuario; en una sesión donde nadie puede responder, eso es una
   denegación. `"$(git branch --show-current)"` sí lo resuelve: es la rama actual.
+  Para trabajar en otra carpeta y volver, usa un subshell (`(cd sub && npm
+  test)`) o `pushd`/`popd`: un `cd` dentro de un `if` o de un bucle deja al
+  hook sin saber dónde corre el push que venga después.
 - **Antes de cada `git push`, los secretos**: el grupo `secretos` sobre cada
   commit que el push subiría. Si falla, el push queda denegado con el motivo:
   sigue sus instrucciones (sacar el archivo de los commits sin pushear; si ya se

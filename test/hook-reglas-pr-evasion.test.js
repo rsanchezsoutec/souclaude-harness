@@ -481,6 +481,10 @@ test('lectura acotada: un comando enorme o mal cerrado no deja al hook sin su pl
     'cd a; '.repeat(N) + 'git push origin main',
     'pushd a; '.repeat(N) + 'git push origin main',
     '('.repeat(N) + 'git push origin main' + ')'.repeat(N),
+    // Un comando anidado se relee en cada nivel: 70 de estos tardaban medio minuto.
+    'eval ('.repeat(70) + '\ngit push origin main',
+    'eval ('.repeat(N) + 'git push origin main' + ')'.repeat(N),
+    'bash -c ('.repeat(N) + 'git push origin main' + ')'.repeat(N),
   ]) {
     const inicio = Date.now()
     const pushes = destinosDelPush(comando, CWD)
@@ -496,6 +500,203 @@ test('lectura acotada: un comando enorme o mal cerrado no deja al hook sin su pl
   const larga = destinosDelPush(`cd ${'a/'.repeat(3000)} && git push origin x`, CWD)[0]
   assert.equal(larga.dir, CWD)
   assert.match(larga.dudaDeCarpeta, /pasa de lo que este hook sigue/)
+})
+
+// --- Lo que encontro la segunda lectura -----------------------------------------
+//
+// Con los arreglos anteriores ya escritos, una verificacion independiente intento
+// romperlos y encontro lo que fijan los tests que siguen: pushes que seguian sin
+// verse, un `cd` que se daba por hecho aunque pudiera no correr, y texto (un
+// heredoc, un patron de `case`) leido como si fueran comandos.
+
+test('piezasDe: el cuerpo de un heredoc es texto, salvo lo que bash ejecuta al expandirlo', () => {
+  // Con el delimitador entre comillas el cuerpo es literal: ni un push, ni un parentesis.
+  assert.deepEqual(segmentos("cat > x.md <<'EOF'\n`git push origin main` y (git push)\n1) uno\nEOF\ngit status"), ["cat > x.md <<'EOF'", 'git status'])
+  assert.deepEqual(segmentos("cat <<'A' <<\"B\"\nuno\nA\ndos\nB\nls"), ['cat <<\'A\' <<"B"', 'ls'])
+  assert.deepEqual(segmentos('cat <<\\FIN\ngit push origin main\nFIN\nls'), ['cat <<\\FIN', 'ls'])
+  // Sin comillas, sus lineas tampoco son comandos; sus sustituciones si se ejecutan.
+  assert.deepEqual(segmentos('cat <<EOF | tee x\ngit push origin main\ncd otro\nEOF\nls'), ['cat <<EOF', 'tee x', 'ls'])
+  assert.deepEqual(segmentos('cat > x.md <<EOF\nUsa `git push origin main` y $(git push origin dev) aca.\nEOF\nls'), ['cat > x.md <<EOF', 'git push origin main', 'git push origin dev', 'ls'])
+  assert.deepEqual(segmentos('cat <<-FIN\n\tgit push origin main\n\tFIN\nls'), ['cat <<-FIN', 'ls'])
+  // Sin su cierre no es un heredoc (o esta sin terminar): no se salta nada.
+  assert.deepEqual(segmentos('echo $((1 << n))\ngit push'), ['echo $', '1 << n', 'git push'])
+  // `<<<` es un here-string: una palabra mas.
+  assert.deepEqual(segmentos("grep x <<< 'EOF'\ngit push\nEOF"), ["grep x <<< 'EOF'", 'git push', 'EOF'])
+  // PowerShell: un here-string es un solo argumento.
+  assert.deepEqual(segmentos("@'\n`git push origin main` (x)\n'@ | Set-Content x.md; git status", 'powershell'), ["@'\n`git push origin main` (x)\n'@", 'Set-Content x.md', 'git status'])
+  // Las posiciones siguen siendo las del comando, tambien dentro de un heredoc.
+  const comando = 'cat <<EOF\nA $(git push origin $(cat f) main) B\nEOF\nls'
+  for (const pieza of piezasDe(comando)) assert.equal(comando.slice(pieza.desde, pieza.hasta), pieza.texto)
+  assert.deepEqual(destinosDelPush(comando, CWD)[0].destinos, ['$(cat f)', 'main'])
+})
+
+test('palabras: una redireccion pegada al final de una palabra no es parte de ella', () => {
+  for (const comando of ['git push origin main>/dev/null', 'git push origin main&>/dev/null', 'git push origin main>>log 2>&1', 'git push origin main 2>/dev/null', 'git push origin main</dev/null']) {
+    assert.deepEqual(palabras(comando), ['git', 'push', 'origin', 'main'], comando)
+  }
+  assert.deepEqual(palabras('cat<<EOF'), ['cat'])
+  assert.deepEqual(palabras('git push origin main *>&1', 'powershell'), ['git', 'push', 'origin', 'main'])
+  // Dentro de una expresion no se toca nada.
+  assert.deepEqual(palabras('git push origin $(cat rama>/dev/null)'), ['git', 'push', 'origin', '$(cat rama>/dev/null)'])
+})
+
+test('comandoEfectivo: un envoltorio con su ruta no es el del shell, y `command -v` no ejecuta nada', () => {
+  assert.deepEqual(comandoEfectivo(['/usr/bin/time', 'cd', 'x']), { p: ['cd', 'x'], viaXargs: false, envoltorios: ['/usr/bin/time'] })
+  assert.deepEqual(comandoEfectivo(['time', 'cd', 'x']).envoltorios, ['time'])
+  assert.deepEqual(comandoEfectivo(['command', '-v', 'git', 'push']).p, [])
+  assert.deepEqual(comandoEfectivo(['command', '-V', 'cd', 'x']).p, [])
+  assert.deepEqual(comandoEfectivo(['command', '-p', 'git', 'push']).p, ['git', 'push'])
+  // Desde Git Bash, `cmd /c` se escribe `cmd //c`.
+  assert.deepEqual(comandoAnidado(['cmd', '//c', 'git push origin main']), { comando: 'git push origin main', shell: 'cmd' })
+})
+
+test('destinosDelPush: ni una asignacion pegada a una sustitucion ni una sustitucion vacia esconden el push', () => {
+  const destinos = (comando, shell) => destinosDelPush(comando, CWD, shell).flatMap((p) => p.destinos)
+  for (const comando of [
+    // La sustitucion no es el final del valor: el resto de la palabra no es un comando.
+    'PATH=$(pwd)/bin:$PATH git push origin main',
+    'PATH=`pwd`/bin:$PATH git push origin main',
+    'PATH=$PATH:`pwd`/bin git push origin main',
+    'X=a$(echo)c git push origin main',
+    'X=`pwd`/x git push origin main',
+    'GIT_CONFIG_GLOBAL=$(pwd)/.gitconfig command git push origin main',
+    // Una sustitucion vacia no es la definicion de una funcion.
+    'git push origin $() main',
+    'git push origin $( ) main',
+    'git push $() origin main',
+    'git push origin `` main',
+    'git push `` origin main',
+    // Una redireccion pegada al refspec, y `cmd //c`.
+    'git push origin main>/dev/null',
+    "cmd //c 'git push origin main'",
+  ]) {
+    assert.ok(destinos(comando).includes('main'), comando)
+  }
+  assert.ok(destinos('git push origin $() main', 'powershell').includes('main'))
+  // Sin refspec sigue siendo la rama actual.
+  assert.deepEqual(destinos('PATH=$(pwd)/bin:$PATH git push'), ['@rama-actual', '@upstream'])
+  // Y la definicion de una funcion sigue siendo eso: su cuerpo se lee.
+  assert.deepEqual(destinos('git() { command git push origin main; }; git status'), ['main'])
+})
+
+test('carpeta del push: el `cd` que puede no haber corrido la deja en duda al salir', () => {
+  const push = (comando, shell) => destinosDelPush(comando, CWD, shell).at(-1)
+  const otro = path.resolve(CWD, 'otro')
+  for (const comando of [
+    'if false; then cd otro; fi; git push origin x',
+    'if test -d otro; then cd otro; else echo no; fi; git push origin x',
+    'for d in; do cd otro; done; git push origin x',
+    'while false; do cd otro; done; git push origin x',
+    'case x in a) cd otro ;; esac; git push origin x',
+    'f() { cd otro; }; git push origin x',
+    'test -d otro && cd otro; git push origin x',
+    'false && { cd otro; }; git push origin x',
+    'true || cd otro; git push origin x',
+  ]) {
+    const p = push(comando)
+    assert.equal(p.dir, CWD, comando)
+    assert.match(p.dudaDeCarpeta, /solo si se cumple una condicion/, comando)
+    assert.equal(p.carpetaAlternativa, otro, comando)
+  }
+  // Adentro del bloque, y mientras sigue la lista, el `cd` acompania al push.
+  for (const comando of ['if test -d otro; then cd otro; git push origin x; fi', 'test -d otro && cd otro && git push origin x', 'for d in a; do cd otro && git push origin x; done']) {
+    assert.equal(push(comando).dir, otro, comando)
+    assert.equal(push(comando).dudaDeCarpeta, null, comando)
+  }
+  // Lo que entra y vuelve a salir no deja dudas.
+  for (const comando of [
+    'for d in api web; do pushd "$d" >/dev/null && npm test; popd >/dev/null; done; git push origin x',
+    'if true; then (cd otro && ls); fi; git push origin x',
+    'for d in a b; do echo $d; done; git push origin x',
+  ]) {
+    assert.equal(push(comando).dudaDeCarpeta, null, comando)
+  }
+  // PowerShell: lo que va entre llaves es un bloque.
+  for (const comando of ['if ($false) { cd otro }; git push origin x', 'function f() { cd otro }; git push origin x', 'foreach ($d in 1,2) {\n  cd otro\n}\ngit push origin x']) {
+    const p = push(comando, 'powershell')
+    assert.equal(p.dir, CWD, comando)
+    assert.match(p.dudaDeCarpeta, /solo si se cumple una condicion/, comando)
+  }
+  assert.equal(push("foreach ($d in 'api','web') { Push-Location $d; npm test; Pop-Location }; git push origin x", 'powershell').dudaDeCarpeta, null)
+  assert.equal(push('cd ${HOME}; git push origin x', 'powershell').dudaDeCarpeta, null, '`${HOME}` no es un bloque')
+  // En otro proceso, o sin ejecutarse: no mueve nada ni deja dudas.
+  for (const comando of ['/usr/bin/time cd otro; git push origin x', 'command -v cd otro; git push origin x']) {
+    assert.equal(push(comando).dir, CWD, comando)
+    assert.equal(push(comando).dudaDeCarpeta, null, comando)
+  }
+})
+
+test('carpeta del push: `eval` la comparte solo si el propio `eval` corre en este shell', () => {
+  const push = (comando) => destinosDelPush(comando, CWD).at(-1)
+  const otro = path.resolve(CWD, 'otro')
+  assert.equal(push('eval "cd otro"; git push origin x').dir, otro)
+  for (const comando of [
+    'eval "cd otro" | cat; git push origin x',
+    'eval "cd otro" & git push origin x',
+    'nohup eval "cd otro"; git push origin x',
+    '(eval "cd otro"); git push origin x',
+    'eval "cd otro" || git push origin x',
+  ]) {
+    assert.equal(push(comando).dir, CWD, comando)
+  }
+  // Cerrando una tuberia depende del shell: queda en duda, si adentro cambia de carpeta.
+  const alFinal = push('true | eval "cd otro"; git push origin x')
+  assert.equal(alFinal.dir, CWD)
+  assert.match(alFinal.dudaDeCarpeta, /eval/)
+  assert.equal(push('true | eval "echo hola"; git push origin x').dudaDeCarpeta, null)
+})
+
+test('carpeta del push: `cd -` y `popd` vuelven a lo que se sabia, y a lo que no', () => {
+  const push = (comando) => destinosDelPush(comando, CWD).at(-1)
+  for (const comando of ['cd "$TMP" && ls; cd -; git push origin x', 'pushd "$TMPDIR" >/dev/null; ls; popd; git push origin x', `pushd "$TMPDIR" >/dev/null; cd "${path.resolve('/otra')}"; popd; git push origin x`]) {
+    assert.equal(push(comando).dir, CWD, comando)
+    assert.equal(push(comando).dudaDeCarpeta, null, comando)
+  }
+  // Tras `cd "$X"` y un `cd` absoluto, `cd -` vuelve a "$X": no se sabe donde.
+  const [a, b] = [path.resolve('/a'), path.resolve('/b')]
+  const p = push(`cd "${a}"; cd "$X"; cd "${b}"; cd -; git push origin x`)
+  assert.equal(p.dir, a)
+  assert.match(p.dudaDeCarpeta, /\$X/)
+  // Una ruta absoluta en `git -C` no depende de donde se este.
+  assert.equal(push(`cd "$X"; git -C "${b}" push origin x`).dudaDeCarpeta, null)
+  assert.match(push('cd "$X"; git -C sub push origin x').dudaDeCarpeta, /\$X/)
+})
+
+test('carpeta del push: con `$CLAUDE_PROJECT_DIR` hay dos carpetas posibles, y las dos se conocen', () => {
+  const push = (comando, shell) => destinosDelPush(comando, CWD, shell)[0]
+  const antes = process.env.CLAUDE_PROJECT_DIR
+  process.env.CLAUDE_PROJECT_DIR = path.resolve('/el proyecto')
+  try {
+    for (const [comando, alternativa] of [
+      ['cd "$CLAUDE_PROJECT_DIR" && git push origin x', path.resolve('/el proyecto')],
+      ['cd "${CLAUDE_PROJECT_DIR:-.}" && git push', path.resolve('/el proyecto')],
+      ['git -C "$CLAUDE_PROJECT_DIR/api" push -u origin x', path.resolve('/el proyecto', 'api')],
+    ]) {
+      const p = push(comando)
+      // El shell de un comando no tiene esa variable: ahi `cd ""` no mueve nada.
+      assert.equal(p.dir, CWD, comando)
+      assert.match(p.dudaDeCarpeta, /CLAUDE_PROJECT_DIR/, comando)
+      assert.equal(p.carpetaAlternativa, alternativa, comando)
+    }
+    assert.equal(push('cd $env:CLAUDE_PROJECT_DIR; git push origin x', 'powershell').carpetaAlternativa, path.resolve('/el proyecto'))
+    // Cualquier otra variable no dice nada de la otra carpeta.
+    assert.equal(push('cd "$DESTINO" && git push origin x').carpetaAlternativa, null)
+  } finally {
+    if (antes === undefined) delete process.env.CLAUDE_PROJECT_DIR
+    else process.env.CLAUDE_PROJECT_DIR = antes
+  }
+})
+
+test('carpeta del push: el `)` de un patron de `case` no cierra el subshell que lo contiene', () => {
+  const dirs = (comando) => destinosDelPush(comando, CWD).map((p) => p.dir)
+  const otro = path.resolve(CWD, 'otro')
+  assert.deepEqual(dirs('(\n  cd otro\n  case "$1" in a) echo ;; esac\n  git push origin x\n)'), [otro])
+  assert.deepEqual(dirs('(cd otro; case "$1" in a|b) echo ;; *) echo ;; esac; git push origin x); git push origin y'), [otro, CWD])
+  assert.deepEqual(dirs('(cd otro; case "$1" in (a) echo ;; esac; git push origin x)'), [otro])
+  // Un subshell dentro de una rama del `case` sigue siendo un subshell.
+  assert.deepEqual(dirs('case "$1" in a) (cd otro; git push origin x) ;; esac; git push origin y'), [otro, CWD])
+  // Y un `case` dentro de una sustitucion no descuenta el parentesis que la cierra.
+  assert.deepEqual(dirs('x=$(case "$1" in a) echo y ;; esac); (cd otro); git push origin x'), [CWD])
 })
 
 test('cambioDePR: la carpeta se lee igual que la del push', () => {
@@ -849,6 +1050,122 @@ test('hook real: `main` escrito en el comando se deniega aunque el remoto salga 
   // Parado en main, `git push $REMOTO` sube main: que el remoto no se pueda leer no cambia eso.
   assert.equal(decision(proyecto({ rama: 'main' }), 'git push $REMOTO')?.tipo, 'deny')
   assert.equal(decision(dir, 'git push $REMOTO')?.tipo, 'ask', 'en una rama de trabajo se pregunta')
+})
+
+test('hook real: nombrar un push en un heredoc no es hacerlo; ejecutarlo desde un heredoc sin comillas, si', () => {
+  const dir = proyecto()
+  for (const comando of [
+    "cat >> notes.md <<'EOF'\n- El hook deniega `git push origin main` fuera del Vault.\nEOF",
+    "git commit -F - <<'EOF'\ndocs: aclara el protocolo del Vault\n\nEl Vault se escribe con `git push origin main`, sin PR.\nEOF",
+    "gh pr create --base dev --title 'docs: guia' --body-file - <<'EOF'\n## Descripcion\nSe documenta que `git push --force` esta prohibido.\nEOF",
+    "cat > x.md <<'EOF'\nNota (git push origin main) no va.\ngit push origin main\ncd /otra/carpeta\nEOF\ngit push origin fix/M1-algo",
+    'cat > x.md <<EOF\ngit push origin main (texto, no un comando)\n1) nota\nEOF',
+    '# sube la rama (no usar `git push origin main`)\ngit push -u origin fix/M1-algo',
+  ]) {
+    assert.equal(decision(dir, comando), null, comando)
+  }
+  assert.equal(decision(dir, "@'\nEn el Vault: `git push origin main` (sin PR).\n'@ | Set-Content docs/vault.md", { toolName: 'PowerShell' }), null)
+  // En un heredoc sin comillas bash ejecuta lo que va entre backticks: ese push es real.
+  assert.equal(decision(dir, 'cat > x.md <<EOF\nUsa `git push origin main` en el Vault.\nEOF')?.tipo, 'deny')
+  // Lo que sigue al heredoc tambien corre, y un `1)` de su cuerpo no cierra el subshell.
+  assert.equal(decision(dir, "cat > x.md <<'EOF'\ntexto\nEOF\ngit push origin main")?.tipo, 'deny')
+  const vault = vaultDePrueba()
+  assert.equal(decision(dir, `(cd "${vault}" && cat >> kanban.md <<'EOF'\n1) mover tarjeta\nEOF\ngit add -A && git commit -m x && git push origin main)`), null)
+  assert.equal(decision(dir, `(\n  cd "${vault}"\n  case "$1" in a) echo ;; esac\n  git push origin main\n)`), null)
+})
+
+test('hook real: el check de secretos corre en cada repo al que el comando pushea, no solo en el primero', () => {
+  const vault = vaultDePrueba()
+  const otra = fs.mkdtempSync(path.join(os.tmpdir(), 'souclaude otra '))
+  const dir = proyecto({ conReglas: true })
+  fs.writeFileSync(path.join(dir, '.env'), 'CLAVE=valor\n')
+  git(dir, 'add', '-f', '.env')
+  git(dir, 'commit', '-q', '-m', 'chore: config')
+  for (const comando of [
+    `(cd "${vault}" && git push); git push`,
+    `(cd "${vault}" && git add -A && git commit -m x && git push origin main); git push -u origin fix/M1-algo`,
+    `bash -c 'cd "${vault}" && git push origin main'; git push`,
+    `git -C "${vault}" push origin main; git push`,
+    `time git -C "${vault}" push origin main; git push`,
+    `(cd "${otra}" && git push); git push`,
+    `cd "${vault}" && git push origin main; cd - && git push`,
+    `git push origin --delete fix/M1-vieja; git push`,
+    'PATH=$(pwd)/bin:$PATH git push',
+  ]) {
+    const d = decision(dir, comando)
+    assert.equal(d?.tipo, 'deny', comando)
+    assert.match(d.motivo, /SHS-M39/, comando)
+  }
+  // Sin nada que subir en el proyecto, el push al Vault sigue pasando.
+  assert.equal(decision(proyecto({ conReglas: true }), `(cd "${vault}" && git push origin main); git push`), null)
+})
+
+test('hook real: la duda entre dos carpetas del mismo repo no se pregunta', () => {
+  const vault = vaultDePrueba()
+  const dir = proyecto()
+  fs.mkdirSync(path.join(dir, 'src'))
+  for (const comando of [
+    'cd src && npm test && cd ..; git push',
+    'if [ -d src ]; then cd src; fi; git push origin fix/M1-algo',
+    'test -d src && cd src; git push',
+    'for d in src; do cd src; done; git push',
+    'cd "$CLAUDE_PROJECT_DIR" && git push origin fix/M1-algo',
+    'git -C "$CLAUDE_PROJECT_DIR" push -u origin fix/M1-algo',
+    'cd "${CLAUDE_PROJECT_DIR:-.}" && git push',
+    'cd "$TMP" && ls; cd -; git push origin fix/M1-algo',
+    'for d in api web; do pushd "$d" >/dev/null && npm test; popd >/dev/null; done; git push',
+  ]) {
+    assert.equal(decision(dir, comando, { env: { CLAUDE_PROJECT_DIR: dir } }), null, comando)
+  }
+  // Si la otra carpeta es otro repo, si: no se sabe a cual va el push.
+  for (const comando of [`if [ -d x ]; then cd "${vault}"; fi; git push origin main`, `test -d x && cd "${vault}"; git push origin main`, `f() { cd "${vault}"; }; git push origin main`]) {
+    const d = decision(dir, comando)
+    assert.equal(d?.tipo, 'deny', comando)
+    assert.match(d.motivo, /solo si se cumple una condicion/, comando)
+  }
+  const d = decision(dir, `if [ -d x ]; then cd "${vault}"; fi; git push`)
+  assert.equal(d?.tipo, 'ask')
+  assert.match(d.motivo, /puede correr en otro repo/)
+  // Con la sesion en otra carpeta, `$CLAUDE_PROJECT_DIR` tampoco alcanza para saberlo.
+  assert.equal(decision(dir, 'cd "$CLAUDE_PROJECT_DIR" && git push', { cwd: vault, env: { CLAUDE_PROJECT_DIR: dir } })?.tipo, 'ask')
+  // Dentro del bloque no hay duda: es el Vault.
+  assert.equal(decision(dir, `if [ -d x ]; then cd "${vault}" && git push origin main; fi`), null)
+})
+
+test('hook real: lo que la segunda lectura encontro que seguia pasando, ya no pasa', () => {
+  const vault = vaultDePrueba()
+  const dir = proyecto()
+  for (const comando of [
+    'PATH=$(pwd)/bin:$PATH git push origin main',
+    'PATH=`pwd`/bin:$PATH git push origin main',
+    'X=a`echo`c git push origin main',
+    'git push origin $() main',
+    'git push origin `` main',
+    'git push origin main>/dev/null',
+    "cmd //c 'git push origin main'",
+    `eval 'cd "${vault}"' | cat; git push origin main`,
+    `eval 'cd "${vault}"' & git push origin main`,
+    `eval 'cd "${vault}"' || git push origin main`,
+    `true | eval 'cd "${vault}"'; git push origin main`,
+    `if false; then cd "${vault}"; fi; git push origin main`,
+    `case x in a) cd "${vault}" ;; esac; git push origin main`,
+    `for d in; do cd "${vault}"; done; git push origin main`,
+    `while false; do cd "${vault}"; done; git push origin main`,
+    `false && { cd "${vault}"; }; git push origin main`,
+    `/usr/bin/time cd "${vault}"; git push origin main`,
+    `command -v cd "${vault}"; git push origin main`,
+    `cd "${vault}"; cd "$X"; cd /; cd -; git push origin main`,
+    `pushd "$TMPDIR" >/dev/null; cd "${vault}"; popd; git push origin main`,
+  ]) {
+    const d = decision(dir, comando)
+    assert.equal(d?.tipo, 'deny', comando)
+    assert.match(d.motivo, /SHS-M42/, comando)
+  }
+  for (const comando of [`if ($false) { cd "${vault}" }; git push origin main`, `function f() { cd "${vault}" }; git push origin main`]) {
+    assert.equal(decision(dir, comando, { toolName: 'PowerShell' })?.tipo, 'deny', comando)
+  }
+  // Y el que si corre en el Vault sigue pasando.
+  assert.equal(decision(dir, `eval 'cd "${vault}"'; git push origin main`), null)
 })
 
 // --- Avisos del check (no bloquean) ----------------------------------------------

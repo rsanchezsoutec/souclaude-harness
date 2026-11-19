@@ -71,10 +71,26 @@ versión, ajustar a él el `to` de las dos migraciones nuevas y regenerar
   (`(cd x)`, `$(cd x)`) ni el que va detrás de un envoltorio que no es del shell
   (`nohup cd x`); `cd -`, `pushd`/`popd` y `Push-Location`/`Pop-Location` se
   siguen. Si la carpeta no se puede leer del comando (`cd "$DESTINO"`,
-  `git -C "$DIR"`), el hook lo evalúa donde está y **pregunta**, o deniega si ahí
-  toca `main`; `~`, `$HOME`, `$PWD` y `$(git rev-parse --show-toplevel)` sí se
+  `git -C "$DIR"`), o si el `cd` puede no haber corrido (el de un `if`, un
+  bucle, el cuerpo de una función o lo que sigue a un `&&`), el hook lo evalúa
+  donde está y **pregunta**, o deniega si ahí toca `main`. No pregunta si las
+  dos carpetas posibles son del mismo repo (`cd src && npm test && cd ..; git
+  push`); `~`, `$HOME`, `$PWD` y `$(git rev-parse --show-toplevel)` sí se
   resuelven. Un comando cortado por una expresión se lee entero: en `git push
   $(echo origin) main`, `main` se ve y se deniega.
+- **El check de secretos del hook corre en cada repo al que el comando pushea**,
+  no solo en el primero: en `git -C <vault> push origin main; git push`, el push
+  del proyecto quedaba sin revisar.
+- **El cuerpo de un heredoc ya no se lee como comandos.** Un documento escrito
+  con `cat > guia.md <<'EOF'` que tuviera una línea `git push origin main` se
+  denegaba, y un `cd` suelto en ese texto movía la carpeta del push que viniera
+  después. Del heredoc sin comillas se leen las sustituciones, que bash sí
+  ejecuta: `cat > guia.md <<EOF` con un `git push origin main` entre backticks
+  hace ese push, y ahora se ve. Lo mismo un here-string de PowerShell. El `)` de
+  un patrón de `case` ya no se toma por el cierre de un subshell.
+- **Una redirección pegada al refspec ya no esconde el push**: `git push origin
+  main>/dev/null` pasaba. Tampoco `cmd //c`, que es como hay que escribirlo
+  desde Git Bash.
 - **Un comentario ya no esconde un push.** El apóstrofo de `# don't …` abría
   una comilla que se tragaba las líneas siguientes: el push que hubiera en ellas
   no se veía, y con él se apagaban la protección de `main` y el check de
@@ -84,8 +100,9 @@ versión, ajustar a él el `to` de las dos migraciones nuevas y regenerar
 - **El hook acota lo que lee de un comando.** Con un comando de cientos de KB
   (decenas de miles de `cd`, o de expresiones anidadas) leerlo costaba el
   cuadrado de su largo y podía pasar del plazo del hook, que entonces no frena
-  nada. La ruta, la pila de `pushd` y la relectura de comandos cortados quedan
-  acotadas, y una expresión sin cerrar se pregunta.
+  nada. La ruta, la pila de `pushd`, la relectura de comandos cortados y la de
+  comandos anidados quedan acotadas; lo que no se alcanza a leer, y una expresión
+  sin cerrar, se preguntan.
 - **Skill `soutec-md-a-pdf`**: del HTML crudo del Markdown solo pasa el marcado
   conocido, y el `href` de un enlace va escapado (antes, un `href` con comillas
   cerraba la etiqueta e inyectaba otra, p. ej. un `<img src="file://…">`). El
