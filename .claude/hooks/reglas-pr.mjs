@@ -347,6 +347,13 @@ function carpetaTrasCd(actual, destino) {
 
 const dudaDeCarpeta = (motivo) => `no se sabe en que carpeta corre (${motivo})`
 
+// Topes para lo que ningun comando real alcanza. Sin ellos, un comando con miles
+// de `cd a` o de `pushd a` alarga la ruta (o la pila) en cada paso, leerlo cuesta
+// el cuadrado de su largo y el hook se queda sin su plazo: un hook que no llega
+// a responder no frena nada.
+const RUTA_MAXIMA = 4096
+const PILA_MAXIMA = 256
+
 // Aplica un `cd`, `pushd` o `popd` al estado de carpeta `e`, si de verdad
 // cambia la carpeta de lo que viene despues, y devuelve true si la cambio. No la
 // cambia el que corre en otro proceso: detras de un envoltorio que no es del
@@ -399,6 +406,10 @@ function cambiarDeCarpeta(e, p, { antes, despues, envoltorios, shell }) {
     e.duda = dudaDeCarpeta(`el destino de \`${nombre} ${destino}\` se resuelve recien al ejecutar`)
     return false
   }
+  if (ruta.length > RUTA_MAXIMA || (ES_PUSHD.test(nombre) && e.pila.length >= PILA_MAXIMA)) {
+    e.duda = dudaDeCarpeta(`tras \`${nombre}\` la ruta o la pila de carpetas pasa de lo que este hook sigue`)
+    return false
+  }
   if (ES_PUSHD.test(nombre)) e.pila.push(e.carpeta)
   // Una ruta absoluta vuelve a dejar en claro donde se esta.
   if (path.isAbsolute(expandida)) e.duda = null
@@ -420,6 +431,10 @@ const SUSTITUCION_DE_LA_RAIZ_DEL_REPO = new RegExp(String.raw`\$\(\s*${RAIZ_DEL_
 // expresion (`git push $(echo origin) main`) se lee entero, con lo que sigue al
 // cierre: `main` es parte del mismo comando.
 const SE_LEE = [ES_CD, ES_PUSHD, ES_POPD, ES_GIT, ES_GH, ES_LANZADOR, ES_SHELL, ES_POWERSHELL, ES_CMD, ES_EVAL]
+// Lo que queda en lugar de una expresion que no se pudo leer entera (sin cierre,
+// o en un comando tan anidado que releerlo no entra en el plazo del hook). Como
+// argumento de un push cuenta como algo que se resuelve recien al ejecutar.
+const EXPRESION_SIN_LEER = '$(...)'
 
 // Cada comando que el texto ejecuta: `p` (sus palabras, sin lo que lo
 // envuelve), la `carpeta` en la que corre y `duda`, el motivo cuando esa
@@ -445,6 +460,8 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, d
   let e = estado ?? { carpeta: cwd, anterior: null, pila: [], duda }
   const ambitos = []
   const yaLeidas = new Set()
+  // Releer entero un comando cortado cuesta su largo; el total queda acotado.
+  let porReleer = texto.length * 4 + 10_000
   let siFallo = null
   let antes = ''
   for (let k = 0; k < piezas.length; k++) {
@@ -457,26 +474,30 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, d
       const defineFuncion = cierreDe.get(k) === k + 1 && !piezas[k + 1].texto.trim()
       if (ABRE.has(pieza.corte) && !defineFuncion && SE_LEE.some((forma) => forma.test(p[0] ?? ''))) {
         // Lo corto una expresion: sigue despues de su cierre, y del de las que vengan.
+        const continuaciones = []
         let fin = k
-        while (ABRE.has(piezas[fin].corte)) {
+        while (fin != null && ABRE.has(piezas[fin].corte)) {
           const cierre = cierreDe.get(fin)
-          if (cierre == null) {
-            fin = piezas.length - 1
-            break
-          }
-          fin = cierre + 1
-          yaLeidas.add(fin)
+          fin = cierre == null ? null : cierre + 1
+          if (fin != null) continuaciones.push(fin)
         }
-        ;({ p, viaXargs, envoltorios } = comandoEfectivo(palabras(texto.slice(pieza.desde, piezas[fin].hasta), shell)))
-        despues = piezas[fin].corte
+        const largo = fin == null ? Infinity : piezas[fin].hasta - pieza.desde
+        if (largo <= porReleer) {
+          porReleer -= largo
+          for (const j of continuaciones) yaLeidas.add(j)
+          ;({ p, viaXargs, envoltorios } = comandoEfectivo(palabras(texto.slice(pieza.desde, piezas[fin].hasta), shell)))
+          despues = piezas[fin].corte
+        } else {
+          p = [...p, EXPRESION_SIN_LEER]
+        }
       }
       // Lo que sigue a `cd x ||` corre solo si ese cd fallo: en la carpeta de antes.
       const aqui = siFallo ?? e
       siFallo = null
       const nombre = p[0] ?? ''
       if (ES_CD.test(nombre) || ES_PUSHD.test(nombre) || ES_POPD.test(nombre)) {
-        const previo = { ...e, pila: [...e.pila] }
-        if (cambiarDeCarpeta(e, p, { antes, despues, envoltorios, shell }) && despues === '||') siFallo = previo
+        const previo = despues === '||' ? { ...e, pila: [...e.pila] } : null
+        if (cambiarDeCarpeta(e, p, { antes, despues, envoltorios, shell }) && previo) siFallo = previo
       } else {
         const anidado = nivel < PROFUNDIDAD_MAXIMA ? comandoAnidado(p, shell) : null
         if (anidado) {

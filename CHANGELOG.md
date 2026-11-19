@@ -81,6 +81,11 @@ versión, ajustar a él el `to` de las dos migraciones nuevas y regenerar
   secretos. Ahora un `#` al comienzo de una palabra descarta el resto de la línea
   (en bash y en PowerShell), y nombrar un push en un comentario deja de contar
   como hacerlo.
+- **El hook acota lo que lee de un comando.** Con un comando de cientos de KB
+  (decenas de miles de `cd`, o de expresiones anidadas) leerlo costaba el
+  cuadrado de su largo y podía pasar del plazo del hook, que entonces no frena
+  nada. La ruta, la pila de `pushd` y la relectura de comandos cortados quedan
+  acotadas, y una expresión sin cerrar se pregunta.
 - **Skill `soutec-md-a-pdf`**: del HTML crudo del Markdown solo pasa el marcado
   conocido, y el `href` de un enlace va escapado (antes, un `href` con comillas
   cerraba la etiqueta e inyectaba otra, p. ej. un `<img src="file://…">`). El

@@ -470,6 +470,34 @@ test('destinosDelPush: un comentario no esconde el push que sigue, ni cuenta com
   assert.deepEqual(destinos('cmd /c "echo # & git push origin main"'), [['main']])
 })
 
+test('lectura acotada: un comando enorme o mal cerrado no deja al hook sin su plazo', () => {
+  // Un hook que se pasa de su plazo no frena nada. Releer los comandos cortados
+  // y resolver una ruta que crece con cada `cd` costaban el cuadrado del largo:
+  // con 20.000 repeticiones, medio minuto o mas; acotado, milisegundos.
+  const N = 20_000
+  for (const comando of [
+    'git a $('.repeat(N) + 'x' + ')'.repeat(N) + '; git push origin main',
+    'git status ('.repeat(N) + ' git push origin main',
+    'cd a; '.repeat(N) + 'git push origin main',
+    'pushd a; '.repeat(N) + 'git push origin main',
+    '('.repeat(N) + 'git push origin main' + ')'.repeat(N),
+  ]) {
+    const inicio = Date.now()
+    const pushes = destinosDelPush(comando, CWD)
+    const tardo = Date.now() - inicio
+    assert.ok(pushes.some((p) => p.destinos.includes('main')), `el push a main se dejo de ver en ${comando.slice(0, 24)}...`)
+    assert.ok(tardo < 5000, `${tardo} ms para ${comando.length} caracteres (${comando.slice(0, 24)}...)`)
+  }
+  // Una expresion sin cerrar no se puede leer entera: cuenta como algo incierto.
+  const sinCerrar = destinosDelPush('git push origin $(cat rama.txt', CWD)[0]
+  assert.match(sinCerrar.incierto, /se resuelve recien al ejecutar/)
+  assert.deepEqual(destinosDelPush('git push origin main $(cat rama.txt', CWD)[0].destinos.slice(0, 1), ['main'], 'lo escrito antes del corte se sigue leyendo')
+  // Una ruta mas larga que cualquier ruta real no se sigue: queda como duda.
+  const larga = destinosDelPush(`cd ${'a/'.repeat(3000)} && git push origin x`, CWD)[0]
+  assert.equal(larga.dir, CWD)
+  assert.match(larga.dudaDeCarpeta, /pasa de lo que este hook sigue/)
+})
+
 test('cambioDePR: la carpeta se lee igual que la del push', () => {
   assert.equal(cambioDePR('(cd otro); gh pr create --fill', CWD).dir, CWD)
   assert.equal(cambioDePR('cd otro && gh pr create --fill', CWD).dir, path.resolve(CWD, 'otro'))
