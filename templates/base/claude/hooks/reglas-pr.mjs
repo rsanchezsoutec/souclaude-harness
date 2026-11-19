@@ -182,7 +182,8 @@ function finDeHereString(comando, i) {
 //   dentro de una expresion aritmetica ni de un subindice (`$((1 << n))`), y el
 //   que queda sin cuerpo dentro de una sustitucion termina con ella.
 //
-// `sinLeerDesde`: desde donde hubo algo que no se pudo leer con certeza (un
+// `cuerpos`: donde quedo el cuerpo de cada heredoc (`en` es la posicion de su
+// `<<`). `sinLeerDesde`: desde donde hubo algo que no se pudo leer con certeza (un
 // heredoc sin cierre o con un delimitador raro, sustituciones demasiado
 // anidadas), o -1. Lo que sigue se leyo igual, como comandos, pero puede no ser
 // lo que el shell ejecuta.
@@ -190,6 +191,9 @@ function leerPiezas(comando, shell = 'bash') {
   const escape = shell === 'powershell' ? '`' : '\\'
   const piezas = []
   let lineas = null
+  // El cuerpo de cada heredoc (de `a` a `b`) y donde estaba su `<<`: es texto,
+  // salvo que quien lo recibe sea un shell (`bash <<EOF`), y entonces es su guion.
+  const cuerposLeidos = []
   let sinLeerDesde = -1
   const noSeLeyo = (desde) => {
     if (sinLeerDesde === -1 || desde < sinLeerDesde) sinLeerDesde = desde
@@ -349,7 +353,7 @@ function leerPiezas(comando, shell = 'bash') {
         } else {
           if (!aritmeticas && !subindices) {
             const heredoc = heredocEn(comando, i + 2)
-            if (heredoc) heredocs.push({ ...heredoc, sustituciones, enBackticks })
+            if (heredoc) heredocs.push({ ...heredoc, sustituciones, enBackticks, en: i })
             else noSeLeyo(i)
           }
           i++
@@ -399,7 +403,7 @@ function leerPiezas(comando, shell = 'bash') {
               pos = -1
               break
             }
-            cuerpos.push({ a: pos, b: cierra.desde, literal: heredoc.literal })
+            cuerpos.push({ a: pos, b: cierra.desde, literal: heredoc.literal, en: heredoc.en })
             pos = cierra.hasta + 1
           }
           heredocs = []
@@ -410,6 +414,7 @@ function leerPiezas(comando, shell = 'bash') {
             // El cuerpo es texto, salvo lo que bash ejecuta al expandirlo: las
             // sustituciones de un heredoc sin comillas.
             for (const { a, b, literal } of cuerpos) if (!literal) sustitucionesDe(a, b)
+            cuerposLeidos.push(...cuerpos)
             desde = pos - 1
             i = pos - 2
           }
@@ -431,7 +436,7 @@ function leerPiezas(comando, shell = 'bash') {
   }
 
   leer(0, null, comando.length, 0)
-  return { piezas, sinLeerDesde }
+  return { piezas, sinLeerDesde, cuerpos: cuerposLeidos }
 }
 
 export function piezasDe(comando, shell = 'bash') {
@@ -548,11 +553,13 @@ const REFSPEC_MATCHING = /^\+?:$/
 // mas env, exec y sudo/doas: como `command git push origin main` casa con la
 // regla allow `Bash(git push:*)`, ese push pasaba sin pregunta Y sin que este
 // hook lo viera. Las palabras de control son las de un if/while/grupo de shell.
-const ENVOLTORIOS = new Set(['command', 'builtin', 'exec', 'time', 'nice', 'nohup', 'stdbuf', 'timeout', 'noglob', 'env', 'sudo', 'doas', 'xargs'])
+// `coproc` lo corre al fondo; `nocorrect` y `repeat N` son de zsh (en bash no
+// existen: ahi ese comando no corre).
+const ENVOLTORIOS = new Set(['command', 'builtin', 'exec', 'time', 'nice', 'nohup', 'stdbuf', 'timeout', 'noglob', 'env', 'sudo', 'doas', 'xargs', 'coproc', 'nocorrect', 'repeat'])
 // De esos, los que son del propio shell: lo que envuelven corre en el mismo
 // proceso. Un `cd` detras de cualquier otro (`nohup cd x`, `env cd x`) corre en
 // un proceso aparte y no mueve la carpeta de lo que sigue.
-const ENVOLTORIOS_DEL_SHELL = new Set(['command', 'builtin', 'time', 'noglob'])
+const ENVOLTORIOS_DEL_SHELL = new Set(['command', 'builtin', 'time', 'noglob', 'nocorrect', 'repeat'])
 const PALABRAS_DE_CONTROL = new Set(['then', 'do', 'else', 'elif', 'if', 'while', 'until', '!', '{', '}'])
 const PROFUNDIDAD_MAXIMA = 4
 
@@ -561,7 +568,8 @@ const PROFUNDIDAD_MAXIMA = 4
 // `envoltorios`: los que se le quitaron, en orden. `dudoso`: se le quito una
 // asignacion o una palabra de control que seguia a un envoltorio que no las
 // admite (`builtin X=1 cd x` busca un builtin llamado `X=1`): puede que ese
-// comando no llegue a correr.
+// comando no llegue a correr. `repite`: lo envuelve un `repeat`, y corre mas
+// de una vez.
 const ASIGNACION = /^[A-Za-z_][A-Za-z0-9_]*=/
 const ADMITEN_ASIGNACIONES = new Set(['env', 'sudo', 'doas', 'time'])
 
@@ -570,6 +578,7 @@ export function comandoEfectivo(palabrasDelSegmento) {
   let viaXargs = false
   let dudoso = false
   let negado = false
+  let repite = false
   const envoltorios = []
   // `git push` entre backticks, o {git push} pegado a las llaves (PowerShell).
   const abre = p[0]?.match(/^[`{]+/)?.[0]
@@ -592,12 +601,16 @@ export function comandoEfectivo(palabrasDelSegmento) {
     const nombre = p[0].replace(/^.*[\\/]/, '').replace(/\.exe$/i, '').toLowerCase()
     if (!ENVOLTORIOS.has(nombre)) break
     // `! time cd x`: tras un `!`, que `time` sea la palabra del shell o el
-    // programa (que corre el `cd` en otro proceso) depende del shell.
-    if (nombre === 'time' && negado) dudoso = true
+    // programa (que corre el `cd` en otro proceso) depende del shell. Y lo que
+    // envuelven `nocorrect` y `repeat` corre solo en zsh.
+    if ((nombre === 'time' && negado) || nombre === 'nocorrect' || nombre === 'repeat') dudoso = true
+    if (nombre === 'repeat') repite = true
     if (nombre === 'xargs') viaXargs = true
     // Escrito con su ruta (`/usr/bin/time`) es un programa aparte, no el del shell.
     envoltorios.push(/[\\/]/.test(p[0]) ? p[0] : nombre)
     p.shift()
+    // `repeat 3 cmd`: la cuenta no es parte del comando.
+    if (nombre === 'repeat') p.shift()
     // `command -v git` solo dice donde esta git: no ejecuta nada.
     if (nombre === 'command' && /^-[vV]$/.test(p[0] ?? '')) return { p: [], viaXargs, envoltorios }
     // Opciones del envoltorio, asignaciones de env y duraciones de timeout/nice.
@@ -606,17 +619,22 @@ export function comandoEfectivo(palabrasDelSegmento) {
       p.shift()
     }
   }
-  return dudoso ? { p, viaXargs, envoltorios, dudoso } : { p, viaXargs, envoltorios }
+  return dudoso ? { p, viaXargs, envoltorios, dudoso, ...(repite && { repite }) } : { p, viaXargs, envoltorios }
 }
 
 // Un comando escrito dentro de otro: `bash -c "..."`, `eval "..."`,
 // `powershell -Command "..."`, `cmd /c ...`. Devuelve el texto a analizar.
+// `$(cat <<EOF ... EOF)` entrega el cuerpo de ese heredoc: en `eval "$(cat
+// <<'EOF' ...)"` o `bash -c "$(cat <<EOF ...)"`, lo que se ejecuta es ese texto.
+const SOLO_UN_CAT = /^\$\(\s*cat\s*<<-?\s*[\\'"]?([A-Za-z0-9_!@%+,.:=/^-]+)['"]?[ \t]*\r?\n([\s\S]*?)\r?\n\t*\1[ \t]*\r?\n?\s*\)$/
+const loQueEntrega = (texto) => texto.match(SOLO_UN_CAT)?.[2] ?? texto
+
 export function comandoAnidado(p, shell = 'bash') {
   const primero = p[0] ?? ''
-  if (ES_EVAL.test(primero)) return p.length > 1 ? { comando: p.slice(1).join(' '), shell } : null
+  if (ES_EVAL.test(primero)) return p.length > 1 ? { comando: loQueEntrega(p.slice(1).join(' ')), shell } : null
   if (ES_SHELL.test(primero)) {
     const i = p.findIndex((w, k) => k > 0 && /^-[a-zA-Z]*c$/.test(w))
-    return i !== -1 && p[i + 1] != null ? { comando: p[i + 1], shell: 'bash' } : null
+    return i !== -1 && p[i + 1] != null ? { comando: loQueEntrega(p[i + 1]), shell: 'bash' } : null
   }
   if (ES_POWERSHELL.test(primero)) {
     const i = p.findIndex((w, k) => k > 0 && /^-c(o(m(m(a(n(d)?)?)?)?)?)?$/i.test(w))
@@ -958,6 +976,17 @@ const soloEstructura = (pieza) => !pieza.texto.trim() || (pieza.crudas.length > 
 // adentro son datos, no comandos.
 const ABRE_UN_ARREGLO = /(^|\s)[A-Za-z_][A-Za-z0-9_]*\+?=$/
 
+// `bash guion.sh`, `sh -x deploy.sh`: el shell corre ese archivo, y su entrada es
+// la del guion. Sin archivo (o con `-s`), lo que lee de la entrada es el guion.
+function tieneGuion(p) {
+  for (let i = 1; i < p.length; i++) {
+    if (p[i] === '-s' || p[i] === '-') return false
+    if (/^(-o|-O|\+o|\+O|--rcfile|--init-file)$/.test(p[i])) i++
+    else if (!p[i].startsWith('-') && !p[i].startsWith('+')) return true
+  }
+  return false
+}
+
 // Una funcion definida en el mismo comando que usa sus argumentos (`retry() {
 // "$@" || "$@"; }`): lo que se le pasa puede ser un comando.
 const USA_SUS_ARGUMENTOS = /\$(\{?[@*1-9])/
@@ -996,7 +1025,9 @@ const nuevaLectura = () => ({ quedan: null, avisado: false, funciones: new Map()
 
 function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, lectura = null } = {}) {
   const texto = comando.replace(SUSTITUCION_DE_LA_RAMA_ACTUAL, 'HEAD').replace(SUSTITUCION_DE_LA_RAIZ_DEL_REPO, '.')
-  const { piezas, sinLeerDesde } = leerPiezas(texto, shell)
+  const { piezas, sinLeerDesde, cuerpos } = leerPiezas(texto, shell)
+  // El texto de los heredocs cuyo `<<` esta entre `desde` y `hasta`.
+  const heredocsDe = (desde, hasta) => cuerpos.filter((cuerpo) => cuerpo.en >= desde && cuerpo.en < hasta).map((cuerpo) => texto.slice(cuerpo.a, cuerpo.b))
   // Un comando anidado se vuelve a leer en cada nivel (`eval (eval (...`): el
   // total de piezas leidas queda acotado, y lo que no se alcanza a leer se
   // pregunta. Un hook que se pasa de su plazo no frena nada.
@@ -1101,6 +1132,9 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, l
   let porReleer = texto.length * 4 + 10_000
   let siFallo = null
   let antes = ''
+  // Lo que el comando anterior de una tuberia le pasa al que sigue, si se puede
+  // leer del texto: `cat <<EOF |`, `echo "..." |`.
+  let loQueViene = null
 
   // Lo que no se pudo leer queda, una vez por comando, como un push del que no
   // se sabe nada: eso se pregunta.
@@ -1119,6 +1153,17 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, l
     for (const nombre of nombres) lectura.funciones.set(nombre, { ...funcion })
     lectura.definidas.push(...nombres)
   }
+  // Lee `texto` en otro ambito de funciones: lo que define ahi no queda definido
+  // aca (`bash -c`, un guion por la entrada), o no se sabe si quedo (`comparte`
+  // distinto de 'no': un `eval` que puede no correr, el final de una tuberia).
+  const enOtroAmbito = function* (lectura_, comparte, leer) {
+    const funciones = lectura_.funciones
+    lectura_.funciones = new Map(funciones)
+    yield* leer()
+    const adentro = lectura_.funciones
+    lectura_.funciones = funciones
+    if (comparte !== 'no') for (const [nombre, funcion] of adentro) if (funciones.get(nombre) !== funcion) funciones.set(nombre, { cuerpo: null, mueve: true })
+  }
   const nivelDeLista = () => (regiones.length ? regiones.at(-1).debajo + (regiones.at(-1).tipo !== 'lista') : 0)
 
   // Deja `e` como "el estado `a` o el estado `b`": la carpeta de `a`, en duda si
@@ -1127,6 +1172,9 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, l
   // anterior, lo que queda en duda es adonde llevan `popd` y `cd -`.
   const unoUOtro = (a, b, motivo, conLaOtra) => {
     volverA(e, a)
+    // Lo que cambio adentro sigue contando: la region que contiene a esta lo usa
+    // para saber si adentro hubo un cambio o varios.
+    e.cambios = Math.max(a.cambios, b.cambios)
     const incierto = () => ({ carpeta: e.carpeta, duda: dudaDeCarpeta(motivo), alternativa: null })
     if (!mismaPila(a.pila, b.pila)) e.pila = Array.from({ length: Math.max(a.pila.length, b.pila.length) }, incierto)
     if (!mismoLugar(a.anterior, b.anterior)) e.anterior = incierto()
@@ -1140,6 +1188,30 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, l
     if (b.carpeta === a.carpeta) e.alternativa = b.alternativa
     else e.alternativa = (b.duda ? b.alternativa === a.carpeta : conLaOtra) ? b.carpeta : null
   }
+  // Lo mismo con varios estados posibles (los pasos de una lista): la carpeta
+  // del primero, en duda si algun otro difiere, y la otra carpeta posible si
+  // entre todos son exactamente dos y se conocen.
+  const unoDeVarios = (estados, motivo) => {
+    const [a] = estados
+    const cambios = Math.max(...estados.map((s) => s.cambios))
+    const misma = { pila: estados.every((s) => mismaPila(a.pila, s.pila)), anterior: estados.every((s) => mismoLugar(a.anterior, s.anterior)) }
+    volverA(e, a)
+    e.cambios = cambios
+    const incierto = () => ({ carpeta: e.carpeta, duda: dudaDeCarpeta(motivo), alternativa: null })
+    if (!misma.pila) e.pila = Array.from({ length: Math.max(...estados.map((s) => s.pila.length)) }, incierto)
+    if (!misma.anterior) e.anterior = incierto()
+    if (estados.every((s) => mismoLugar(a, s))) return
+    const posibles = new Set()
+    let cualquiera = false
+    for (const s of estados) {
+      posibles.add(s.carpeta)
+      if (s.duda && s.alternativa) posibles.add(s.alternativa)
+      else if (s.duda) cualquiera = true
+    }
+    posibles.delete(a.carpeta)
+    e.duda = a.duda ?? estados.find((s) => s.duda)?.duda ?? dudaDeCarpeta(motivo)
+    e.alternativa = !cualquiera && posibles.size === 1 ? [...posibles][0] : null
+  }
   // Al salir de algo que puede no haber corrido. Si adentro cambio la carpeta,
   // vuelve la de antes y queda en duda; la otra carpeta posible se conoce solo
   // si adentro hubo un unico cambio: con dos (`if a; then cd x; else cd y; fi`)
@@ -1151,12 +1223,19 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, l
   }
   const salirDe = (region) => {
     const antesDe = region.estado
-    if (mismoEstado(e, antesDe)) return
-    const fin = copiaDe(e)
     // El cuerpo de una funcion corre cuando se la llama; y tras un `cd` que
     // falla seguro (`cd no-existe && ...`), lo que seguia no corrio.
-    if (region.tipo === 'funcion' || (fin.imposible && !antesDe.imposible)) volverA(e, antesDe)
-    else unoUOtro(antesDe, fin, 'un `cd` anterior corre solo si se cumple una condicion', fin.cambios - antesDe.cambios === 1 && !(region.bucle && seRepite(antesDe.carpeta, fin.carpeta)))
+    const posible = (s) => !(s.imposible && !antesDe.imposible)
+    // Una lista pudo terminar en cualquiera de sus pasos: en `cd x && make && cd
+    // -`, si falla `make`, se queda en x.
+    const salidas = (region.salidas ?? []).filter((s) => posible(s) && !mismoEstado(s, antesDe))
+    if (mismoEstado(e, antesDe) && !salidas.length) return
+    const fin = copiaDe(e)
+    const motivo = 'un `cd` anterior corre solo si se cumple una condicion'
+    if (region.tipo === 'funcion') volverA(e, antesDe)
+    else if (salidas.length) unoDeVarios([antesDe, ...salidas, ...(posible(fin) ? [fin] : [])], motivo)
+    else if (!posible(fin)) volverA(e, antesDe)
+    else unoUOtro(antesDe, fin, motivo, fin.cambios - antesDe.cambios === 1 && !(region.bucle && seRepite(antesDe.carpeta, fin.carpeta)))
   }
   const cerrarHasta = (tipo) => {
     const i = regiones.findLastIndex((region) => region.tipo === tipo)
@@ -1180,7 +1259,7 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, l
     } else if (pieza.corte === '|' || pieza.corte === '&') volverA(e, region.estado)
     else if (region.tipo !== 'grupo' || region.trasTuberia) salirDe(region)
   }
-  const entrar = (tipo, extra = {}) => regiones.push({ tipo, estado: copiaDe(e), debajo: nivelDeLista(), ...extra })
+  const entrar = (tipo, extra = {}) => regiones.push({ tipo, estado: copiaDe(e), debajo: nivelDeLista(), salidas: [], ...extra })
   // Lo que sigue a un `&&` o a un `||` corre solo si lo anterior salio de cierta manera.
   const entrarEnLista = (antes) => {
     if ((antes === '&&' || antes === '||') && regiones.at(-1)?.tipo !== 'lista') entrar('lista')
@@ -1193,6 +1272,9 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, l
     if (antes === ';' || antes === '&' || antes === '') while (regiones.at(-1)?.tipo === 'lista') salirDe(regiones.pop())
     if (antes === ';' || antes === '&' || antes === '' || ABRE.has(antes)) inicios.set(nivelDeLista(), { ...copiaDe(e), definidas: lectura.definidas.length })
     if (antes !== '|' && !CIERRA.has(antes)) tuberias.set(nivelDeLista(), copiaDe(e))
+    // La lista pudo terminar justo antes de esta pieza (si fallo lo anterior,
+    // tras un `&&`; si no fallo, tras un `||`): el estado de ahora es una salida posible.
+    if ((antes === '&&' || antes === '||') && regiones.at(-1)?.tipo === 'lista') regiones.at(-1).salidas.push(copiaDe(e))
     // Desde lo que no se pudo leer con certeza (un heredoc sin cierre), tampoco
     // se sabe en que carpeta corre lo que sigue.
     if (sinLeerDesde !== -1 && pieza.hasta > sinLeerDesde && !e.duda) dudar(e, 'una parte del comando no se pudo leer con certeza')
@@ -1276,6 +1358,13 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, l
         }
       }
 
+      // Si este comando alimenta una tuberia con un texto que se conoce, y si el
+      // anterior lo alimentaba a el.
+      const entrada = antes === '|' ? loQueViene : null
+      const susHeredocs = heredocsDe(pieza.desde, piezas[termina].hasta)
+      const emite = /^cat$/.test(leido.p[0] ?? '') && leido.p.length === 1 ? susHeredocs : /^(echo|printf)$/.test(leido.p[0] ?? '') ? [leido.p.slice(1).join(' ').replaceAll('\\n', '\n')] : []
+      loQueViene = despues === '|' && emite.length ? emite : null
+
       // Lo que el comando hace. `antes` es el operador que lo precede.
       const correr = function* (antes) {
         let { p } = leido
@@ -1309,7 +1398,7 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, l
             if (previo && !mismoLugar(aqui, previo)) siFallo = previo
           } else {
             const adentro = copiaDe(aqui)
-            yield* comandosDe(anidado.comando, aqui.carpeta, anidado.shell, adentroDe, { estado: adentro, lectura })
+            yield* enOtroAmbito(lectura, comparte, () => comandosDe(anidado.comando, aqui.carpeta, anidado.shell, adentroDe, { estado: adentro, lectura }))
             if (comparte === 'si' && !mismoEstado(adentro, aqui)) dudar(e, `\`${nombre}\` corre solo si falla el comando anterior`)
             if (comparte === 'depende' && !mismoEstado(adentro, aqui)) dudar(e, `\`${nombre}\` cierra una tuberia, y que su \`cd\` quede o no depende del shell`)
           }
@@ -1332,9 +1421,11 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, l
             lectura.enCurso.delete(llamada)
           }
           // Una funcion llamada `git` suele envolver al programa: el comando se lee
-          // tambien tal cual. De las demas, si usa sus argumentos, lo que sigue a su
+          // tal cual. De las demas, si usa sus argumentos, lo que sigue a su
           // nombre puede ser un comando: es un envoltorio mas.
-          if (ES_GIT.test(llamada) || ES_GH.test(llamada)) p = [...p]
+          // Si no se sabe que hace, y se llama como uno de los comandos que se leen
+          // (`eval`, `cd`, `bash`...), puede ser ese mismo comando.
+          if (ES_GIT.test(llamada) || ES_GH.test(llamada) || (funcion.cuerpo == null && seLee(llamada))) p = [...p]
           else if (funcion.cuerpo == null || USA_SUS_ARGUMENTOS.test(funcion.cuerpo)) {
             // (`g X=1 cd x` busca un comando llamado `X=1`: ese `cd` puede no correr.)
             if (ASIGNACION.test(p[1] ?? '') || PALABRAS_DE_CONTROL.has(p[1])) contexto.quiza = true
@@ -1345,15 +1436,43 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, l
         }
 
         const nombre = p[0] ?? ''
+        const anidado = comandoAnidado(p, shell)
+        // Un shell sin `-c` ni archivo lee su guion de la entrada: un heredoc
+        // (`bash <<EOF`), un here-string (`bash <<< '...'`) o lo que le pasa el
+        // comando anterior (`cat <<EOF | sh`, `echo "..." | bash`). `source
+        // /dev/stdin` lo lee en este mismo shell.
+        // (La palabra de un here-string no es el archivo de un guion.)
+        const hereString = shell === 'bash' ? palabras(pieza.texto.match(/<<<\s*([\s\S]*)$/)?.[1] ?? '', shell).slice(0, 1) : []
+        const leeLaEntrada = shell === 'bash' && !anidado && ((ES_SHELL.test(nombre) && !tieneGuion(p.filter((palabra) => palabra !== hereString[0]))) || (/^(source|\.)$/.test(nombre) && p[1] === '/dev/stdin'))
         if (ES_CD.test(nombre) || ES_PUSHD.test(nombre) || ES_POPD.test(nombre)) {
+          if (leido.repite) {
+            // `repeat 3 cd ..` sube tres carpetas en zsh, y en bash no corre.
+            dudar(e, `\`repeat\` repite ese \`${nombre}\`, y solo existe en zsh`)
+            return
+          }
           // `cd x && a; b`: si ese cd puede fallar (la carpeta no existe), `a` corre
           // solo si no fallo, y `b` corre igual: tambien es una lista condicional.
           if (trasEl === '&&' && puedeFallar(e, p, shell, lectura.creadas) && regiones.at(-1)?.tipo !== 'lista') entrar('lista')
           entrarEnLista(antes)
           const previo = trasEl === '||' ? copiaDe(e) : null
           if (cambiarDeCarpeta(e, p, contexto) && previo) siFallo = previo
+        } else if (leeLaEntrada) {
+          const guion = [...susHeredocs, ...hereString, ...(entrada ?? [])]
+          if (guion.length) yield* leerAdentro({ comando: guion.join('\n'), shell: 'bash' }, ES_SHELL.test(nombre) ? 'no' : correAca(contexto), nombre)
+        } else if (nombre === 'trap' && shell === 'bash') {
+          // `trap 'accion' SENAL`: la accion corre mas tarde, donde se este entonces.
+          const operandos = p.slice(1).filter((x) => !/^-[lp-]*$/.test(x))
+          if (operandos.length > 1 && operandos[0] !== '-' && operandos[0] !== '') {
+            const adentro = copiaDe(aqui)
+            dudar(adentro, 'la accion de un `trap` corre mas tarde, donde se este entonces')
+            const antesDeLeerla = copiaDe(adentro)
+            yield* enOtroAmbito(lectura, 'si', () => comandosDe(operandos[0], adentro.carpeta, shell, nivel + 1, { estado: adentro, lectura }))
+            // Y si cambia de carpeta, puede hacerlo antes de lo que sigue: con
+            // DEBUG, ERR o RETURN en cualquier momento, y en zsh la de EXIT puesta
+            // dentro de una funcion corre al salir de ella.
+            if (!mismoEstado(adentro, antesDeLeerla)) dudar(e, 'la accion de un `trap` cambia de carpeta, y puede correr antes de lo que sigue')
+          }
         } else {
-          const anidado = comandoAnidado(p, shell)
           if (anidado) yield* leerAdentro(anidado, ES_EVAL.test(nombre) ? correAca(contexto) : 'no', nombre)
           else if (p.length && !pieza.defineFuncion) {
             // `mkdir build`: esa carpeta va a existir cuando corra lo que sigue.
@@ -1382,7 +1501,7 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, l
       const [inicio, tuberia] = [inicios.get(nivelDeLista()), tuberias.get(nivelDeLista())]
       if (inicio && tuberia) {
         // Lo mismo las funciones que esa lista definio: en bash no quedan definidas.
-        for (const nombre of lectura.definidas.slice(inicio.definidas)) if (lectura.funciones.has(nombre)) lectura.funciones.get(nombre).cuerpo = null
+        for (const nombre of lectura.definidas.slice(inicio.definidas)) if (lectura.funciones.has(nombre)) lectura.funciones.set(nombre, { ...lectura.funciones.get(nombre), cuerpo: null })
         const { definidas: _, ...estadoAlEmpezar } = inicio
         unoUOtro(estadoAlEmpezar, tuberia, 'que quede el `cd` de una lista mandada al fondo depende del shell', tuberia.cambios - inicio.cambios === 1)
       }
@@ -1396,13 +1515,17 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, l
           definir(esperaCuerpo.nombres, { cuerpo: aLaVista ? texto.slice(pieza.hasta, piezas[cierre].hasta + 1) : null, mueve: false })
           esperaCuerpo = null
         }
-        ambitos.push({ e, regiones, esperaCuerpo, inicios, tuberias })
+        // Lo que se define adentro (funciones incluidas) termina con el subshell.
+        ambitos.push({ e, regiones, esperaCuerpo, inicios, tuberias, funciones: lectura.funciones })
         e = copiaDe(e)
         regiones = []
         inicios = new Map()
         tuberias = new Map()
+        lectura.funciones = new Map(lectura.funciones)
       } else if (CIERRA.has(pieza.corte) && ambitos.length) {
-        ;({ e, regiones, esperaCuerpo, inicios, tuberias } = ambitos.pop())
+        let funciones
+        ;({ e, regiones, esperaCuerpo, inicios, tuberias, funciones } = ambitos.pop())
+        lectura.funciones = funciones
       }
     }
     antes = pieza.corte
@@ -1410,7 +1533,10 @@ function* comandosDe(comando, cwd, shell = 'bash', nivel = 0, { estado = null, l
 
   // Fin del texto. Lo que quedo abierto y podia no correr termina aca: importa
   // cuando el estado es de quien llamo (un `eval`, una funcion).
-  if (ambitos.length) ({ e, regiones } = ambitos[0])
+  if (ambitos.length) {
+    ;({ e, regiones } = ambitos[0])
+    lectura.funciones = ambitos[0].funciones
+  }
   while (regiones.length) salirDe(regiones.pop())
   // Algo no se pudo leer con certeza y el texto habla de un push: se pregunta.
   if (sinLeerDesde !== -1 && /push|send-pack/i.test(texto)) yield* sinLeerEn(e)

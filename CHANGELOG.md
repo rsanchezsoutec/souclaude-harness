@@ -137,6 +137,17 @@ versión, ajustar a él el `to` de las dos migraciones nuevas y regenerar
   que los contiene; y de una carpeta que todavía no existe y que no crea un
   `mkdir` del mismo comando (un clon, un worktree) no se conoce el repo: ese
   push se pregunta, y si nombra `main` se deniega.
+- **El guion que un shell recibe por su entrada se lee como comandos.** Al
+  pasar a leer el cuerpo de un heredoc como texto, `bash <<'EOF'` con un
+  `git push origin main` adentro había dejado de verse, y el hook original sí
+  lo frenaba. Ahora se lee el guion de `bash`, `sh` o `zsh` sin `-c` ni
+  archivo, venga de un heredoc, de un here-string (`bash <<< '…'`) o de la
+  tubería (`cat <<EOF | sh`, `echo '…' | bash`), y también `source
+  /dev/stdin`, `eval "$(cat <<'EOF' … EOF)"`, la acción de un `trap` y lo que
+  envuelven `coproc`, `repeat` y `nocorrect`. Una función definida en un
+  subshell o en otro proceso (`bash -c`, un guion por la entrada) ya no se da
+  por definida afuera, y una lista como `cd x && make && cd -` puede terminar en
+  cualquiera de sus pasos: si falla `make`, el push siguiente corre en x.
 - **Un push que puede correr en una de dos carpetas conocidas se evalúa en las
   dos** —reglas de rama y check de secretos— y vale lo más estricto, en vez de
   preguntar: `npm ci && cd scripts && npm test; cd ..; git push` deja de
