@@ -204,14 +204,22 @@ function archivosSinPushear(cabeza) {
 }
 
 // El texto de lo que se agrega o modifica, sin contexto (-U0): es lo que revisa
-// secretosEnContenido. Un diff gigante corta por maxBuffer y el chequeo de
-// contenido se informa como no revisado; nunca tumba el check.
+// secretosEnContenido. Tiene su propio plazo, bien por debajo de los 30 s que
+// el hook le da a este script antes de un push: en un primer push con mucha
+// historia, `git log -p` puede tardar mas que eso, y el resultado que bloquea
+// (el de nombres de archivo) no puede perderse por esperar a un aviso. Un diff
+// gigante corta por maxBuffer. En los dos casos el chequeo de contenido se
+// informa como no revisado; nunca tumba el check. --no-ext-diff y --no-textconv:
+// leer el diff no ejecuta los programas que el repo tenga configurados para eso.
+const PLAZO_DEL_CONTENIDO = 8_000
+
 function diffDe(args) {
-  return execFileSync('git', ['-c', 'core.quotePath=false', ...args, '--no-renames', '--diff-filter=AM', '-U0', '--no-color', '--no-ext-diff'], {
+  return execFileSync('git', ['-c', 'core.quotePath=false', ...args, '--no-renames', '--diff-filter=AM', '-U0', '--no-color', '--no-ext-diff', '--no-textconv'], {
     encoding: 'utf8',
     env: ENTORNO,
     stdio: ['ignore', 'pipe', 'pipe'],
     maxBuffer: 64 * 1024 * 1024,
+    timeout: PLAZO_DEL_CONTENIDO,
   })
 }
 
@@ -562,8 +570,11 @@ function evaluar(values) {
   }
   if (values.grupo === 'secretos') {
     if (values['sin-pushear']) {
-      resultados.push(evaluaSecretos(archivosSinPushear(values.cabeza || 'HEAD'), 'en commits sin pushear'))
-      resultados.push(contenidoSinBloquear(() => diffSinPushear(values.cabeza || 'HEAD'), 'de los commits sin pushear'))
+      const porNombre = evaluaSecretos(archivosSinPushear(values.cabeza || 'HEAD'), 'en commits sin pushear')
+      resultados.push(porNombre)
+      // Con un archivo de credenciales el push ya se deniega: ese resultado no
+      // espera a que ademas se revise el contenido.
+      if (porNombre.cumple !== false) resultados.push(contenidoSinBloquear(() => diffSinPushear(values.cabeza || 'HEAD'), 'de los commits sin pushear'))
     } else {
       resultados.push(cabeza ? evaluaSecretos(archivosAgregados(baseLocal, cabeza)) : sinCabeza('sin-secretos'))
       if (cabeza) resultados.push(contenidoSinBloquear(() => diffAgregado(baseLocal, cabeza), 'agregadas'))

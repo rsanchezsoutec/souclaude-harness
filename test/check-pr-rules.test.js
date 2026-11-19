@@ -522,6 +522,44 @@ test('secretos: una credencial pegada en un archivo cualquiera se avisa, sin cam
   assert.match(conArchivo.stdout, /^\[FAIL\] sin-secretos: /m)
 })
 
+test('secretos antes del push: con un archivo de credenciales no se espera al chequeo de contenido', () => {
+  const dir = repoConBase()
+  commitear(dir, { '.env': 'X=1\n', 'src/config.js': `export const clave = "${CLAVE_AWS}"\n` }, 'feat: config')
+
+  // Lo que corre el hook: el resultado que deniega el push sale solo.
+  const antesDelPush = correrCheck(dir, ['--grupo', 'secretos', '--sin-pushear'])
+  assert.equal(antesDelPush.status, 1)
+  assert.match(antesDelPush.stdout, /^\[FAIL\] sin-secretos: .*\.env/m)
+  assert.doesNotMatch(antesDelPush.stdout, /sin-secretos-en-contenido/)
+
+  // En el check del PR van los dos: ahi no hay un push esperando la respuesta.
+  const delPR = correrCheck(dir, ['--grupo', 'secretos'])
+  assert.equal(delPR.status, 1)
+  assert.match(delPR.stdout, /^\[FAIL\] sin-secretos: .*\.env/m)
+  assert.match(delPR.stdout, /^\[AVISO\] sin-secretos-en-contenido: .*src\/config\.js:1/m)
+})
+
+test('secretos: revisar el contenido no ejecuta los filtros textconv que el repo tenga configurados', () => {
+  const dir = repoConBase()
+  const aparte = fs.mkdtempSync(path.join(os.tmpdir(), 'souclaude textconv '))
+  const marca = path.join(aparte, 'corrio')
+  const filtro = path.join(aparte, 'filtro.mjs')
+  fs.writeFileSync(filtro, `import fs from 'node:fs'\nfs.writeFileSync(${JSON.stringify(marca)}, 'x')\nprocess.stdout.write(fs.readFileSync(process.argv[2]))\n`)
+  const conBarras = (ruta) => ruta.replace(/\\/g, '/')
+  git(dir, 'config', 'diff.filtro.textconv', `"${conBarras(process.execPath)}" "${conBarras(filtro)}"`)
+  commitear(dir, { '.gitattributes': '*.dat diff=filtro\n', 'datos.dat': 'uno\ndos\n' }, 'feat: datos')
+
+  // El filtro esta bien configurado: un `git log -p` cualquiera lo ejecuta.
+  git(dir, 'log', '-p', '-1')
+  assert.ok(fs.existsSync(marca), 'el filtro de prueba no corre ni con git log -p: este test no probaria nada')
+  fs.rmSync(marca)
+
+  for (const args of [['--grupo', 'secretos'], ['--grupo', 'secretos', '--sin-pushear']]) {
+    assert.equal(correrCheck(dir, args).status, 0, args.join(' '))
+    assert.ok(!fs.existsSync(marca), `el check ejecuto el filtro textconv (${args.join(' ')})`)
+  }
+})
+
 test('secretos: sin nada que avisar, la salida es la de siempre (una linea)', () => {
   const dir = repoConBase()
   commitear(dir, { 'a.txt': 'hola\n', 'src/b.js': 'export const b = 2\n' }, 'feat: a')
