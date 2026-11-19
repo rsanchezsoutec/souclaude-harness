@@ -78,7 +78,8 @@ versión, ajustar a él el `to` de las dos migraciones nuevas y regenerar
 - **Skill `soutec-md-a-pdf`**: del HTML crudo del Markdown solo pasa el marcado
   conocido, y el `href` de un enlace va escapado (antes, un `href` con comillas
   cerraba la etiqueta e inyectaba otra, p. ej. un `<img src="file://…">`). El
-  texto de los títulos se escapa antes de volver a entrar al índice.
+  texto de los títulos —secciones y subtítulos— se escapa antes de volver a entrar
+  al índice.
 - **Monitor**: lo que se lee del registro compartido del Vault entra saneado
   (`--usage` lo imprimía tal cual en la terminal) y con los números validados;
   una sesión sin carpeta de trabajo conocida ya no publica como «proyecto» la ruta

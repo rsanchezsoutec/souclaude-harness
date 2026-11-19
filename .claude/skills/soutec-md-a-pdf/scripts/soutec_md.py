@@ -417,6 +417,15 @@ def plain(text):
     return html_mod.unescape(re.sub(r"<[^>]+>", "", text))
 
 
+def toc_markup(text):
+    """Texto literal -> marcado de una entrada del índice del PDF.
+
+    ReportLab interpreta el texto de cada entrada como marcado de párrafo. Sin
+    escapar, un título «Precio < 10 & cantidad > 5» perdía lo que quedaba entre
+    los signos, y lo que pareciera una etiqueta se reinyectaba como tal."""
+    return html_mod.escape(text)
+
+
 # ============================================================
 #  Marcado inline -> destinos
 # ============================================================

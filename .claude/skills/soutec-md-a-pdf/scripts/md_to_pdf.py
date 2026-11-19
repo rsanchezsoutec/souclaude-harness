@@ -27,7 +27,6 @@ Front-matter YAML-lite opcional al inicio del .md, entre '---':
 """
 import argparse
 import datetime
-import html
 import io
 import os
 import re
@@ -51,7 +50,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import soutec_md as core
 from soutec_md import (
     parse_front_matter, truthy, extract_title, md_to_blocks, today_es,
-    inline_to_rl, plain,
+    inline_to_rl, plain, toc_markup,
 )
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -142,7 +141,9 @@ class SectionBanner(Flowable):
     def __init__(self, number, title):
         super().__init__()
         self.number = number
-        self.title = re.sub(r"<[^>]+>", "", title)   # el banner usa texto plano
+        # Texto plano y literal, tal como lo entrega plain(): ya no trae
+        # etiquetas, y un «<» que quede es parte del título, no marcado.
+        self.title = title
         self.key = f"sec{number}"
         # No dejar la franja huérfana al pie: si el contenido que sigue no cabe
         # bajo el banner, ReportLab mueve el banner a la página siguiente.
@@ -457,10 +458,10 @@ class SoutecDoc(BaseDocTemplate):
             # Destino /FitH a la altura del banner; el 4º campo del TOCEntry (la
             # key) hace la entrada del índice clicable y anclada al encabezado.
             self.canv.bookmarkHorizontalAbsolute(flowable.key, self._anchor_top(flowable))
-            txt = f"{flowable.number}&nbsp;&nbsp;{re.sub(r'<[^>]+>', '', flowable.title)}"
-            self.notify("TOCEntry", (0, txt, self.page, flowable.key))
-            self.canv.addOutlineEntry(re.sub(r"<[^>]+>", "", flowable.title),
-                                      flowable.key, level=0)
+            # El título es texto literal y el índice lo interpreta como marcado:
+            # va escapado. El marcador del PDF, en cambio, lo toma tal cual.
+            self.notify("TOCEntry", (0, f"{flowable.number}&nbsp;&nbsp;{toc_markup(flowable.title)}", self.page, flowable.key))
+            self.canv.addOutlineEntry(flowable.title, flowable.key, level=0)
         elif isinstance(flowable, Paragraph):
             name = flowable.style.name
             if name in ("H2", "H3"):
@@ -477,7 +478,7 @@ class SoutecDoc(BaseDocTemplate):
                 # getPlainText() devuelve el texto ya sin escapar y el índice lo
                 # vuelve a interpretar como marcado: un título con «<» o «&»
                 # (p. ej. código en línea) se reinyectaba como etiquetas.
-                self.notify("TOCEntry", (lvl, html.escape(flowable.getPlainText()), self.page, key))
+                self.notify("TOCEntry", (lvl, toc_markup(flowable.getPlainText()), self.page, key))
 
 
 # ============================================================

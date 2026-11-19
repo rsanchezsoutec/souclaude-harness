@@ -152,6 +152,27 @@ class TitulosYFrontMatter(unittest.TestCase):
         self.assertEqual(cuerpo, "# Cuerpo\n")
 
 
+class IndiceDelPDF(unittest.TestCase):
+    def test_el_texto_de_una_entrada_va_escapado(self):
+        # ReportLab lo interpreta como marcado: sin escapar, lo que queda entre
+        # «<» y «>» se perdía o entraba como etiqueta.
+        self.assertEqual(sm.toc_markup('Precio < 10 & "x" > 5'), "Precio &lt; 10 &amp; &quot;x&quot; &gt; 5")
+        self.assertEqual(sm.toc_markup(sm.plain("Uso de <code>&lt;script&gt;</code> &amp; más")), "Uso de &lt;script&gt; &amp; más")
+
+    def test_el_motor_de_pdf_escapa_todas_las_entradas_y_no_vuelve_a_quitar_etiquetas(self):
+        # md_to_pdf.py no se puede importar sin reportlab: se lee su texto.
+        with open(os.path.join(SCRIPTS, "md_to_pdf.py"), encoding="utf-8") as f:
+            fuente = f.read()
+        entradas = [linea for linea in fuente.splitlines() if 'notify("TOCEntry"' in linea]
+        self.assertEqual(len(entradas), 2, "se esperaba una entrada para las secciones y otra para los subtítulos")
+        for linea in entradas:
+            self.assertIn("toc_markup(", linea)
+        # El título de sección llega como texto literal (plain()): volver a
+        # quitarle "etiquetas" se comía «< 10 & cantidad >».
+        self.assertNotIn("flowable.title)}", fuente.replace("toc_markup(flowable.title)}", ""))
+        self.assertIn("self.title = title", fuente)
+
+
 class ImagenesYSalida(unittest.TestCase):
     def test_una_imagen_del_cuerpo_no_desaparece_en_silencio(self):
         # Los motores no incrustan imagenes; antes se perdian sin dejar rastro.
