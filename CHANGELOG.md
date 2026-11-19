@@ -75,6 +75,12 @@ versión, ajustar a él el `to` de las dos migraciones nuevas y regenerar
   toca `main`; `~`, `$HOME`, `$PWD` y `$(git rev-parse --show-toplevel)` sí se
   resuelven. Un comando cortado por una expresión se lee entero: en `git push
   $(echo origin) main`, `main` se ve y se deniega.
+- **Un comentario ya no esconde un push.** El apóstrofo de `# don't …` abría
+  una comilla que se tragaba las líneas siguientes: el push que hubiera en ellas
+  no se veía, y con él se apagaban la protección de `main` y el check de
+  secretos. Ahora un `#` al comienzo de una palabra descarta el resto de la línea
+  (en bash y en PowerShell), y nombrar un push en un comentario deja de contar
+  como hacerlo.
 - **Skill `soutec-md-a-pdf`**: del HTML crudo del Markdown solo pasa el marcado
   conocido, y el `href` de un enlace va escapado (antes, un `href` con comillas
   cerraba la etiqueta e inyectaba otra, p. ej. un `<img src="file://…">`). El

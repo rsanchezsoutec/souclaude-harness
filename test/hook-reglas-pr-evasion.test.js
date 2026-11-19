@@ -252,6 +252,17 @@ test('piezasDe: cada pieza con el operador que la corto; en cmd un `&` separa co
   ])
   // En PowerShell el backtick escapa: ni corta ni deja cortar al caracter que sigue.
   assert.deepEqual(cortes('echo a`;b', 'powershell'), [['echo a`;b', '']])
+  // Un comentario se descarta hasta el fin de la linea; un `#` dentro de una palabra no lo es.
+  assert.deepEqual(cortes("echo a # it's\ngit push"), [
+    ['echo a', ';'],
+    ['', ';'],
+    ['git push', ''],
+  ])
+  assert.deepEqual(cortes('echo a#b $# "# c" \\#d'), [['echo a#b $# "# c" \\#d', '']])
+  assert.deepEqual(cortes('rem # x & git push', 'cmd'), [
+    ['rem # x', ';'],
+    ['git push', ''],
+  ])
   // `desde` y `hasta` son la posicion de la pieza en el comando.
   const comando = 'git push origin $(cat "rama (vieja).txt") main'
   for (const pieza of piezasDe(comando)) assert.equal(comando.slice(pieza.desde, pieza.hasta), pieza.texto)
@@ -439,6 +450,24 @@ test('destinosDelPush: sin refspec sube la rama actual, aunque el remoto no se p
   // Con xargs o un alias los argumentos llegan por otro lado: no se asume nada.
   assert.deepEqual(push('echo main | xargs git push origin').destinos, [])
   assert.deepEqual(push('git -c alias.p=push p origin').destinos, [])
+})
+
+test('destinosDelPush: un comentario no esconde el push que sigue, ni cuenta como push', () => {
+  const destinos = (comando, shell) => destinosDelPush(comando, CWD, shell).map((p) => p.destinos)
+  // El apostrofo de un comentario abria una comilla que se tragaba el resto del comando.
+  assert.deepEqual(destinos("# Let's push the fix\ngit push origin main"), [['main']])
+  assert.deepEqual(destinos("git fetch origin  # don't skip this\ngit push origin main"), [['main']])
+  assert.deepEqual(destinos("# Let's push\ngit push origin main", 'powershell'), [['main']])
+  // Nombrar un push en un comentario no es hacerlo.
+  assert.deepEqual(destinos('git push origin fix/M1-x # no usar: git push origin main'), [['fix/M1-x']])
+  assert.deepEqual(destinos('git push origin fix/M1-x  # sube la rama; git push origin main seria un error'), [['fix/M1-x']])
+  assert.deepEqual(destinos('# git push origin main\ngit push origin fix/M1-x'), [['fix/M1-x']])
+  // Un `#` que no empieza una palabra no es un comentario.
+  for (const comando of ['echo a#b; git push origin main', 'echo a\\ #b; git push origin main', 'echo "# no"; git push origin main', 'echo $# ; git push origin main', 'x=${y#z}; git push origin main']) {
+    assert.deepEqual(destinos(comando), [['main']], comando)
+  }
+  // En cmd el `#` no comenta nada.
+  assert.deepEqual(destinos('cmd /c "echo # & git push origin main"'), [['main']])
 })
 
 test('cambioDePR: la carpeta se lee igual que la del push', () => {
@@ -753,6 +782,23 @@ test('hook real: si no se puede saber en que carpeta corre el push, pregunta; si
   assert.equal(decision(dir, 'git push origin main', { cwd: vault }), null, 'sin dudas, el Vault sigue exento')
   // En modo solo no hay preguntas.
   assert.equal(decision(proyecto({ modo: 'solo' }), 'cd "$DESTINO" && git push'), null)
+})
+
+test('hook real: un comentario con apostrofo no esconde el push a main; nombrarlo en un comentario no molesta', () => {
+  const dir = proyecto()
+  for (const comando of ["# Let's push the fix\ngit push origin main", "git fetch origin  # don't skip this\ngit push origin main", "echo listo # it's done\ngit push origin main"]) {
+    const d = decision(dir, comando)
+    assert.equal(d?.tipo, 'deny', comando)
+    assert.match(d.motivo, /SHS-M42/, comando)
+  }
+  assert.equal(decision(dir, "# Let's push\ngit push origin main", { toolName: 'PowerShell' })?.tipo, 'deny')
+  for (const comando of [
+    'git push origin fix/M1-algo # no usar: git push origin main',
+    'git push origin fix/M1-algo  # sube la rama; git push origin main seria un error',
+    '# git push origin main\ngit push origin fix/M1-algo',
+  ]) {
+    assert.equal(decision(dir, comando), null, comando)
+  }
 })
 
 test('hook real: `main` escrito en el comando se deniega aunque el remoto salga de una expresion', () => {

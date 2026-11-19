@@ -69,7 +69,8 @@ const GRUPOS = [
 // saltos de linea), por los parentesis de un subshell o de una sustitucion de
 // comando -- `(git push)`, `$(git push)` -- y, en bash, por los backticks, sin
 // cortar dentro de comillas: `git commit -m "x; git push"` es un solo segmento.
-// Las redirecciones (2>&1, &>) no son operadores.
+// Las redirecciones (2>&1, &>) no son operadores, y un comentario (`# ...`) no
+// es parte de ningun segmento.
 export function segmentos(comando, shell = 'bash') {
   return piezasDe(comando, shell)
     .map((pieza) => pieza.texto.trim())
@@ -85,12 +86,18 @@ const CIERRA = new Set([')', '`)'])
 // expresion, y en bash un par de backticks tambien (`\`(` y `\`)`). `shell` es
 // 'bash' (y los que se le parecen), 'powershell' o 'cmd'; en cmd un `&` suelto
 // no manda nada al fondo: separa comandos que corren uno tras otro, como `;`.
+//
+// Un `#` al comienzo de una palabra abre un comentario hasta el fin de la linea
+// (en bash y en PowerShell; en cmd no): su texto se descarta. Sin eso, el
+// apostrofo de `# don't ...` abria una comilla que se tragaba las lineas
+// siguientes, y el push que hubiera en ellas no se veia.
 export function piezasDe(comando, shell = 'bash') {
   const escape = shell === 'powershell' ? '`' : '\\'
   const piezas = []
   let desde = 0
   let comilla = null
   let enBackticks = false
+  let enPalabra = false
   const cortar = (hasta, corte, largo = 1) => {
     piezas.push({ texto: comando.slice(desde, hasta), desde, hasta, corte })
     desde = hasta + largo
@@ -102,25 +109,41 @@ export function piezasDe(comando, shell = 'bash') {
       else if (c === comilla) comilla = null
       continue
     }
+    const empiezaPalabra = !enPalabra
+    enPalabra = true
     if (c === "'" || c === '"') {
       comilla = c
     } else if (c === escape && i + 1 < comando.length) {
       i++
     } else if (c === '&' && ((i > desde && /[<>]/.test(comando[i - 1])) || comando[i + 1] === '>')) {
       // 2>&1, &>: una redireccion, no un operador.
+    } else if (c === '#' && empiezaPalabra && shell !== 'cmd') {
+      // Comentario: hasta el fin de la linea no hay nada que se ejecute.
+      const fin = comando.indexOf('\n', i)
+      cortar(i, ';', (fin === -1 ? comando.length : fin) - i)
+      i = desde - 1
+      enPalabra = false
     } else if (c === '`' && shell === 'bash') {
       cortar(i, enBackticks ? '`)' : '`(')
+      // Lo que sigue al backtick que abre es el comienzo de un comando; lo que
+      // sigue al que cierra (`x=\`cmd\`#y`) es parte de la misma palabra.
+      enPalabra = enBackticks
       enBackticks = !enBackticks
     } else if (c === '(' || c === ')') {
       cortar(i, c)
+      enPalabra = c === ')'
     } else if (c === ';' || c === '\n' || c === '\r') {
       cortar(i, ';')
+      enPalabra = false
     } else if (c === '&' || c === '|') {
       // `&&` y `||` son un solo operador; `|&` es una tuberia (con stderr).
       const largo = comando[i + 1] === c || (c === '|' && comando[i + 1] === '&') ? 2 : 1
       const corte = comando[i + 1] === c ? c + c : c === '&' && shell === 'cmd' ? ';' : c
       cortar(i, corte, largo)
       i += largo - 1
+      enPalabra = false
+    } else if (/\s/.test(c)) {
+      enPalabra = false
     }
   }
   cortar(comando.length, '')
