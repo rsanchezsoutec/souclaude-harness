@@ -3259,9 +3259,35 @@ export function procesar(entrada, correr = correrReal) {
   return null
 }
 
+// Lee entero lo que llega por stdin. `fs.readFileSync(0)` puede cortar con
+// EAGAIN si la tuberia todavia no trae todo (en macOS, con mas de 64 KB): el hook
+// no veia nada y dejaba pasar el comando sin revisarlo.
+function leerStdin() {
+  const pedazos = []
+  const buf = Buffer.alloc(1 << 16)
+  const espera = new Int32Array(new SharedArrayBuffer(4))
+  const vence = Date.now() + 20_000
+  for (;;) {
+    let n
+    try {
+      n = fs.readSync(0, buf, 0, buf.length, null)
+    } catch (e) {
+      if (e.code === 'EAGAIN' && Date.now() < vence) {
+        Atomics.wait(espera, 0, 0, 5)
+        continue
+      }
+      if (e.code === 'EOF') break
+      throw e
+    }
+    if (n === 0) break
+    pedazos.push(Buffer.from(buf.subarray(0, n)))
+  }
+  return Buffer.concat(pedazos).toString('utf8')
+}
+
 function leerEntrada() {
   try {
-    return JSON.parse(fs.readFileSync(0, 'utf8') || '{}')
+    return JSON.parse(leerStdin() || '{}')
   } catch {
     return {}
   }
