@@ -1,6 +1,6 @@
 # souclaude-harness
 
-**v3.18.1**
+**v3.19.0**
 
 CLI para instalar y migrar el harness de Claude Code de SOUTEC en cualquier repo: uno
 nuevo, uno legacy de cinco años, o uno que ya tiene una versión vieja del harness.
@@ -30,6 +30,7 @@ progress/                     progreso del proyecto y protocolo del Vault
     soutec-github             flujo Git/GitHub (obligatoria, se instala siempre)
     it-security-review        security review para IT
     security-report-standard  estándar de informes de seguridad
+    cloudflare-security-audit auditoría de seguridad de Cloudflare (solo a pedido)
     soutec-md-a-pdf           Markdown a PDF con identidad Soutec
     adr-new                   documentar decisiones con ADRs
     harness-upgrade           actualizar el harness desde Claude

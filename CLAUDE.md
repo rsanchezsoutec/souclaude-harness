@@ -9,7 +9,7 @@ organización.
 
 ## Harness
 
-Harness `3.18.1`. Sin agentes ni flujos fijos: el modelo trabaja directo. Las skills
+Harness `3.19.0`. Sin agentes ni flujos fijos: el modelo trabaja directo. Las skills
 viven en `.claude/skills/` y se aplican solas cuando el contexto lo amerita (en un
 proyecto consumidor se eligen al instalar con `npx souclaude`; `soutec-github` es
 obligatoria y siempre está):
@@ -17,6 +17,8 @@ obligatoria y siempre está):
 - `soutec-github` — flujo Git/GitHub obligatorio de SOUTEC.
 - `it-security-review` — security review para IT.
 - `security-report-standard` — estándar de informes de seguridad.
+- `cloudflare-security-audit` — auditoría de seguridad de Cloudflare; solo a pedido,
+  con `/cloudflare-security-audit`.
 - `soutec-md-a-pdf` — Markdown a PDF con identidad Soutec.
 - `adr-new` — documentar decisiones con ADRs.
 - `harness-upgrade` — actualizar el harness.
